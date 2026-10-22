@@ -5,7 +5,7 @@
 <title>Mechanics Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
-  MECHANICS SANDBOX - Phase 3 (editor + core physics + AP analysis tools)
+  MECHANICS SANDBOX - Phase 4 (editor, core physics, AP analysis tools, advanced elements)
   ---------------------------------------------------
   One self-contained file. Sections in the <script> below:
     1. Utilities (vector math)
@@ -333,6 +333,8 @@ function newScene() {
     settings: {
       pxPerM: 100, grid: 0.1, showGrid: true, snapGrid: true, labelPx: 19,
       g: 9.81,               // m/s^2, points down (-y)
+      gMode: 'uniform',      // 'uniform' = constant g downward; 'universal' = every pair attracts, F = G m1 m2 / r^2
+      G: 1,                  // N m^2/kg^2 for universal mode (real value 6.674e-11; 1 makes sandbox-size orbits)
       dt: 1 / 240,           // fixed physics time step (s)
       restThreshold: 0.05,   // m/s: slower impacts than this don't bounce (Box2D default is 1 m/s)
       velIters: 30,          // solver iterations (Box2D default 8) - more = stiffer joints/ropes
@@ -356,27 +358,31 @@ const uid = () => 'o' + (scene.nextId++);
    ===================================================================== */
 // Physical properties shared by every body. Iover = moment of inertia override ('' = compute from shape).
 // vx, vy, omega are the initial conditions at t = 0.
-const PHYS = () => ({ mass: 1, fixed: false, mu_s: 1.0, mu_k: 1.0, e: 0, collide: true, stick: false, Iover: '', vx: 0, vy: 0, omega: 0, labelDx: 0, labelDy: 0 });
+// drag: air resistance 'none' | 'linear' (F = -b v) | 'quadratic' (F = -c |v| v).
+const PHYS = () => ({ mass: 1, fixed: false, mu_s: 1.0, mu_k: 1.0, e: 0, collide: true, stick: false, Iover: '', vx: 0, vy: 0, omega: 0, drag: 'none', dragB: 0.1, dragC: 0.05, labelDx: 0, labelDy: 0 });
 const DEF = {
-  surface: () => ({ kind: 'line', pts: [], side: 1, hatch: true, mu_s: 0.5, mu_k: 0.3, e: 0 }),
+  surface: () => ({ kind: 'line', pts: [], side: 1, hatch: true, mu_s: 0.5, mu_k: 0.3, e: 0, show: true }),
   block: () => ({ x: 0, y: 0, w: 1.2, h: 0.7, angle: 0, fill: 'gray', label: 'm', ...PHYS() }),
-  cart: () => ({ x: 0, y: 0, w: 1.4, h: 0.6, angle: 0, wheelR: 0.11, fill: 'white', rolling: false, label: 'm', ...PHYS() }),
+  // rolling: false = "frictionless cart" (wheels drawn, mu = 0); true = real wheels that roll (wheelMass each, solid disks)
+  cart: () => ({ x: 0, y: 0, w: 1.4, h: 0.6, angle: 0, wheelR: 0.11, fill: 'white', rolling: false, wheelMass: 0.1, label: 'm', ...PHYS() }),
   disk: () => ({ x: 0, y: 0, r: 0.4, angle: 0, fill: 'gray', shape: 'solid disk', centerPin: true, showR: false, rLabel: 'r', label: '', ...PHYS() }),
   rod: () => ({ x: 0, y: 0, len: 1, angle: 0, width: 3, label: '', ...PHYS(), mass: 0.5 }),
   pointmass: () => ({ x: 0, y: 0, style: 'mass', size: 9, label: 'm', ...PHYS(), labelDx: 0.22, labelDy: 0.12 }),
   // pulley: mass 0 = ideal massless pulley (rope slides, equal tension both sides);
   //         mass > 0 = real pulley (rope can't slip, pulley spins). fixed = axle fixed in place.
   pulley: () => ({ x: 0, y: 0, r: 0.17, angle: 0, fill: 'white', mount: 'none', mountAngle: -90, mountLen: 30, shape: 'solid disk', label: '', ...PHYS(), fixed: true, mass: 0 }),
-  pin: () => ({ p: { x: 0, y: 0 }, mount: 'none', mountAngle: -90, mountLen: 24, torsionK: 0, show: true }),
-  weld: () => ({ p: { x: 0, y: 0 }, show: false }),
-  track: () => ({ a: { x: 0, y: 0 }, b: { x: 1, y: 0 }, width: 12, hatch: false, rotate: false }),
+  // host: what the point is mounted on. '' = auto (whatever body is under it), 'ground', or a body id.
+  pin: () => ({ p: { x: 0, y: 0 }, mount: 'none', mountAngle: -90, mountLen: 24, torsionK: 0, show: true, host: '' }),
+  weld: () => ({ p: { x: 0, y: 0 }, show: false, host: '' }),
+  track: () => ({ a: { x: 0, y: 0 }, b: { x: 1, y: 0 }, width: 12, hatch: false, rotate: false, show: true, host: '' }),
   spring: () => ({ a: null, b: null, style: 'zigzag', coils: 8, amp: 8, nonlinear: false, k: 100, k2: 100, k3: 0, restLen: 1, label: 'k', labelSide: 1 }),
   damper: () => ({ a: null, b: null, c: 1, label: 'c', labelSide: 1 }),
   springdamper: () => ({ a: null, b: null, style: 'zigzag', coils: 6, amp: 7, nonlinear: false, k: 100, k2: 100, k3: 0, c: 1, restLen: 1, labelK: 'k', labelC: 'c', swap: false }),
-  actuator: () => ({ a: null, b: null, law: '0', restLen: 1, showRL: false, label: '', labelRL: 'R_L', K: 1, RL: 1, labelSide: 1 }),
+  // mode: 'law' = typed force law F(t, d, v); 'em' = electromagnetic damper F = -(K^2/R_L) v
+  actuator: () => ({ a: null, b: null, mode: 'law', law: '0', restLen: 1, showRL: false, label: '', labelRL: 'R_L', K: 1, RL: 1, labelSide: 1 }),
   rope: () => ({ a: null, b: null, via: [], slack: 0, label: '' }),
-  force: () => ({ p: null, angle: 0, len: 0.7, at: 'tail', frame: 'world', law: '5', label: 'F' }),
-  moment: () => ({ p: null, r: 0.25, start: 200, sweep: -110, law: '1', label: 'M' }),
+  force: () => ({ p: null, angle: 0, len: 0.7, at: 'tail', frame: 'world', law: '5', label: 'F', host: '' }),
+  moment: () => ({ p: null, r: 0.25, start: 200, sweep: -110, law: '1', label: 'M', host: '' }),
   line: () => ({ a: null, b: null, dash: 'solid', weight: 1 }),
   dim: () => ({ a: null, b: null, orient: 'aligned', off: 0.3, label: '\\ell', showValue: false }),
   angle: () => ({ v: null, r: null, t: null, rad: 0.45, arrows: 'end', showRef: true, label: '\\theta', showValue: false }),
@@ -730,6 +736,11 @@ function connLabel(A, B, tex, side, extra = 0) {
 const DRAW = {
   surface(o) {
     if (o.pts.length < 2) return '';
+    if (o.show === false) {                           // invisible surface: faint in the editor, absent from exports
+      if (EXPORT) return '';
+      const d = pathD(o.pts.map(S));
+      return `<path d="${d}" fill="none" stroke="#aaa" stroke-width="1.5" stroke-dasharray="6 4"/>` + hit(d);
+    }
     return polyS(o.pts.map(S), LW.body) + (o.hatch ? hatchWorld(o.pts, o.side) : '');
   },
   block(o) {
@@ -741,7 +752,15 @@ const DRAW = {
     const hw = o.w / 2, hh = o.h / 2, rpx = o.wheelR * view.ppm;
     const c = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => S(L2W(o, x, y)));
     let s = polyS(c, LW.body, { closed: true, fill: FILL[o.fill] });
-    for (const sx of [-0.3, 0.3]) s += circS(S(L2W(o, o.w * sx, -hh - o.wheelR)), rpx - 1, 2.5, '#fff');
+    [-0.3, 0.3].forEach((sx, i) => {
+      const wc = S(L2W(o, o.w * sx, -hh - o.wheelR));
+      s += circS(wc, rpx - 1, 2.5, '#fff');
+      // Rolling wheels get a spoke in the editor so you can see them turn (not exported).
+      if (o.rolling && !EXPORT) {
+        const a = (o.wheelAng ? o.wheelAng[i] : o.angle || 0) + Math.PI / 2;
+        s += `<path d="M${f(wc.x)} ${f(wc.y)}L${f(wc.x + (rpx - 3) * Math.cos(a))} ${f(wc.y - (rpx - 3) * Math.sin(a))}" stroke="#888" stroke-width="1.5"/>`;
+      }
+    });
     return s + bodyLabel(o);
   },
   disk(o) {
@@ -783,6 +802,11 @@ const DRAW = {
   },
   track(o) {
     const A = S(P(o.a)), B = S(P(o.b)), n = V.perp(V.unit(V.sub(B, A))), h = o.width / 2;
+    if (o.show === false) {                           // hidden slider (e.g. Ref 2's elastic pendulum)
+      if (EXPORT) return '';
+      const d = pathD([A, B]);
+      return `<path d="${d}" fill="none" stroke="#aaa" stroke-width="1" stroke-dasharray="3 3"/>` + hit(d);
+    }
     const a1 = V.add(A, V.mul(n, h)), b1 = V.add(B, V.mul(n, h)), a2 = V.sub(A, V.mul(n, h)), b2 = V.sub(B, V.mul(n, h));
     let s = polyS([a1, b1], 1.5) + polyS([a2, b2], 1.5) + polyS([a1, a2], 1.5) + polyS([b1, b2], 1.5);
     if (o.hatch) s += hatchAlong([a1, b1], () => n, 9, 7) + hatchAlong([b2, a2], () => V.mul(n, -1), 9, 7);
@@ -1391,7 +1415,7 @@ const Fd = {
   deg: (k, l) => ({ t: 'deg', k, l }),
   degv: (k, l) => ({ t: 'num', k, l, step: 1 }),          // value already stored in degrees
   bool: (k, l) => ({ t: 'bool', k, l }),
-  sel: (k, l, o) => ({ t: 'sel', k, l, o }),
+  sel: (k, l, o) => ({ t: 'sel', k, l, o }),             // o: list of options, or a function (obj) -> list
   tex: (k, l) => ({ t: 'tex', k, l }),
   text: (k, l) => ({ t: 'text', k, l }),
   expr: (k, l, vars) => ({ t: 'expr', k, l, vars }),
@@ -1403,8 +1427,15 @@ const fmtI = (o) => { const I = inertiaOf(o); return (isFinite(I) ? I.toPrecisio
 const CONTACT_FIELDS = [Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1),
   Fd.bool('collide', 'Collides with others'), Fd.bool('stick', 'Stick on contact (perfectly inelastic)')];
 const INIT_FIELDS = [Fd.head('Initial conditions (t = 0)'), Fd.num('vx', 'v₀ₓ (m/s)', 0.1), Fd.num('vy', 'v₀ᵧ (m/s)', 0.1), Fd.num('omega', 'ω₀ (rad/s, + = CCW)', 0.1)];
+const when = (fd, fn) => ({ ...fd, when: fn });
+const DRAG_FIELDS = [Fd.sel('drag', 'Air resistance', [['none', 'none'], ['linear', 'linear  F = −b·v'], ['quadratic', 'quadratic  F = −c·|v|·v']]),
+  when(Fd.num('dragB', 'b (N·s/m)', 0.01, 0), (o) => o.drag === 'linear'), when(Fd.num('dragC', 'c (N·s²/m²)', 0.01, 0), (o) => o.drag === 'quadratic'),
+  when(Fd.info('Terminal speed (falling)', (o) => { const g = Math.abs(scene.settings.g), m = +o.mass || 0; return (o.drag === 'linear' ? m * g / o.dragB : Math.sqrt(m * g / o.dragC)).toPrecision(4) + ' m/s'; }), (o) => o.drag !== 'none' && o.mass > 0)];
 const PHYS_FIELDS = [Fd.head('Physics'), Fd.num('mass', 'Mass m (kg)', 0.1, 0), Fd.bool('fixed', 'Fixed (immovable)'),
-  Fd.info('I about center', fmtI), Fd.text('Iover', 'I override (kg·m², blank = auto)'), ...CONTACT_FIELDS, ...INIT_FIELDS];
+  Fd.info('I about center', fmtI), Fd.text('Iover', 'I override (kg·m², blank = auto)'), ...CONTACT_FIELDS, ...DRAG_FIELDS, ...INIT_FIELDS];
+// "Mounted on" choices: auto, ground, or any body in the scene.
+const hostOpts = () => [['', 'auto (the body under it)'], ['ground', 'ground (fixed in place)'], ...scene.objects.filter((b) => META[b.type].body).map((b) => [b.id, bodyName(b)])];
+const HOST = Fd.sel('host', 'Mounted on', hostOpts);
 const PULLEY_PHYS = [Fd.head('Physics'), Fd.num('mass', 'Mass (kg, 0 = ideal)', 0.1, 0), Fd.bool('fixed', 'Axle fixed in place'),
   Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop']), Fd.info('I about center', fmtI), Fd.text('Iover', 'I override (kg·m², blank = auto)'),
   Fd.info('Rope on pulley', (o) => (o.mass > 0 ? 'no slip: pulley spins, tensions differ' : 'ideal: rope slides, same tension both sides')),
@@ -1415,33 +1446,39 @@ const curLen = (o) => V.dist(P(o.a), P(o.b));
 const restBtn = Fd.btn('Set rest length to current length', (o) => { o.restLen = +curLen(o).toFixed(4); });
 const SPRING_LOOK = [Fd.sel('style', 'Style', ['zigzag', 'coil']), Fd.num('coils', 'Coil count', 1, 2, 40), Fd.num('amp', 'Coil width (px)', 1, 2, 30), Fd.bool('nonlinear', 'Nonlinear F = -(k₂Δ + k₃Δ³)')];
 const FIELDS = {
-  surface: [Fd.info('Kind', (o) => o.kind), Fd.bool('hatch', 'Hatching'), Fd.sel('side', 'Hatch side', [[1, 'right of drawing direction'], [-1, 'left of drawing direction']]),
+  surface: [Fd.info('Kind', (o) => o.kind), Fd.bool('show', 'Draw it (off = invisible surface)'), Fd.bool('hatch', 'Hatching'), Fd.sel('side', 'Hatch side', [[1, 'right of drawing direction'], [-1, 'left of drawing direction']]),
     Fd.head('Physics'), Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1)],
   block: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), ...PHYS_FIELDS, ...LABEL_FIELDS],
-  cart: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.num('wheelR', 'Wheel radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.bool('rolling', 'Real rolling wheels (Phase 4)'), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  cart: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.num('wheelR', 'Wheel radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']),
+    Fd.head('Wheels'), Fd.sel('rolling', 'Wheels', [[false, 'frictionless cart (wheels just drawn)'], [true, 'real wheels that roll']]),
+    when(Fd.num('wheelMass', 'Mass of each wheel (kg)', 0.01, 0.001), (o) => o.rolling), when(Fd.info('Total mass', (o) => (+o.mass + 2 * o.wheelMass).toPrecision(4) + ' kg (body + 2 solid-disk wheels)'), (o) => o.rolling),
+    ...PHYS_FIELDS, ...LABEL_FIELDS],
   disk: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop', 'sphere']), Fd.bool('centerPin', 'Center pin'), Fd.bool('showR', 'Radius arrow'), Fd.tex('rLabel', 'Radius label'), ...PHYS_FIELDS, ...LABEL_FIELDS],
   pulley: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.sel('fill', 'Fill', ['white', 'gray', 'none']), Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), ...PULLEY_PHYS, ...LABEL_FIELDS],
   rod: [...POS, Fd.num('len', 'Length (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.num('width', 'Line weight (px)', 0.5, 0.5),
     Fd.info('Mass 0 means', () => 'massless rigid rod: keeps its two ends a fixed distance apart'), ...PHYS_FIELDS, ...LABEL_FIELDS],
   pointmass: [...POS, Fd.sel('style', 'Style', [['mass', 'point mass (filled)'], ['bob', 'pendulum bob']]), Fd.num('size', 'Dot radius (px)', 1, 2), ...PHYS_FIELDS, ...LABEL_FIELDS],
-  pin: [Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0), Fd.bool('show', 'Draw pin symbol'),
-    Fd.info('Joins', () => 'every body at this point (ground too if mounted, or if only one body is here)')],
-  weld: [Fd.bool('show', 'Show in export'), Fd.info('Joins', () => 'every body at this point rigidly (to the ground if only one body)')],
-  track: [Fd.num('width', 'Slot width (px)', 1, 2), Fd.bool('hatch', 'Hatching'), Fd.bool('rotate', 'Slider may rotate (collar)'),
-    Fd.info('Slides', () => 'any body whose center is on the track; the ends are stops')],
+  pin: [HOST, Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0), Fd.bool('show', 'Draw pin symbol'),
+    Fd.info('Joins', (o) => (o.host === 'ground' ? 'every body here to the ground' : o.host ? 'the body it is mounted on to every other body here (just an attachment point if none)' : 'every body at this point (ground too if mounted, or if only one body is here)'))],
+  weld: [HOST, Fd.bool('show', 'Show in export'), Fd.info('Joins', () => 'every body at this point rigidly (to the ground if only one body)')],
+  track: [HOST, Fd.bool('show', 'Draw the slot'), Fd.num('width', 'Slot width (px)', 1, 2), Fd.bool('hatch', 'Hatching'), Fd.bool('rotate', 'Slider may rotate (collar)'),
+    Fd.info('Slides', (o) => 'any body whose center is on the track; the ends are stops' + (o.host === 'ground' ? '' : '. If an end is attached to a moving body (or you pick one above), the track rides on that body.'))],
   spring: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
     Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
   damper: [Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
   springdamper: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
     Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.bool('swap', 'Swap branches'), Fd.tex('labelK', 'Spring label'), Fd.tex('labelC', 'Damper label')],
-  actuator: [Fd.expr('law', 'Force law F(t, d, v) (N)', ['t', 'd', 'v']), Fd.info('Sign', () => 'F > 0 pushes the ends apart; d = L − L₀, v = dL/dt'),
-    Fd.num('restLen', 'Reference length L₀ (m)', 0.01, 0), restBtn, Fd.bool('showRL', 'Show R_L in parallel'), Fd.num('K', 'Motor constant K', 0.1), Fd.num('RL', 'R_L (Ω)', 0.1, 0.001),
-    Fd.info('Equivalent damping K²/R_L', (o) => (o.K * o.K / o.RL).toFixed(3) + ' N·s/m'),
-    Fd.btn('Use as EM damper: F = −(K²/R_L)·v', (o) => { o.law = `-${+(o.K * o.K / o.RL).toPrecision(6)}*v`; }), Fd.tex('label', 'Label'), Fd.tex('labelRL', 'R_L label')],
+  actuator: [Fd.sel('mode', 'Force model', [['law', 'typed law F(t, d, v)'], ['em', 'electromagnetic damper (R_L)']]),
+    when(Fd.expr('law', 'Force law F(t, d, v) (N)', ['t', 'd', 'v', 'delta']), (o) => o.mode !== 'em'),
+    when(Fd.info('Variables', () => 'F > 0 pushes the ends apart; d (or delta) = L − L₀, v = dL/dt, t = time'), (o) => o.mode !== 'em'),
+    Fd.num('restLen', 'Reference length L₀ (m)', 0.01, 0), restBtn, Fd.bool('showRL', 'Show R_L in parallel'), Fd.num('K', 'Motor constant K (N/A)', 0.1), Fd.num('RL', 'R_L (Ω)', 0.1, 0.001),
+    Fd.info('Equivalent damping c = K²/R_L', (o) => (o.K * o.K / o.RL).toPrecision(4) + ' N·s/m'),
+    when(Fd.info('How it works', () => 'moving the ends at v makes a voltage K·v; the current K·v/R_L through R_L pushes back with F = K·i = (K²/R_L)·v, heating R_L'), (o) => o.mode === 'em'),
+    Fd.tex('label', 'Label'), Fd.tex('labelRL', 'R_L label')],
   rope: [Fd.info('Length along path', (o) => ropeGeom(o).length.toFixed(3) + ' m'), Fd.num('slack', 'Extra (slack) length (m)', 0.01, 0), Fd.info('Wraps', (o) => o.via.length + ' pulley(s)'),
     Fd.btn('Reverse wrap directions', (o) => o.via.forEach((v) => { v.s = -v.s; })), Fd.tex('label', 'Label')],
-  force: [Fd.expr('law', 'Magnitude F(t) (N)', ['t']), Fd.degv('angle', 'Direction (°)'), Fd.sel('frame', 'Direction is fixed in', ['world', 'body']), Fd.sel('at', 'Point is the arrow’s', ['tail', 'tip']), Fd.num('len', 'Drawn length (m)', 0.05, 0.05), Fd.tex('label', 'Label')],
-  moment: [Fd.expr('law', 'M(t) (N·m, + = CCW)', ['t']), Fd.num('r', 'Arc radius (m)', 0.01, 0.02), Fd.degv('start', 'Start angle (°)'), Fd.degv('sweep', 'Sweep (°, sign = direction)'), Fd.tex('label', 'Label')],
+  force: [HOST, Fd.expr('law', 'Magnitude F(t) (N)', ['t']), Fd.degv('angle', 'Direction (°)'), Fd.sel('frame', 'Direction is fixed in', ['world', 'body']), Fd.sel('at', 'Point is the arrow’s', ['tail', 'tip']), Fd.num('len', 'Drawn length (m)', 0.05, 0.05), Fd.tex('label', 'Label')],
+  moment: [HOST, Fd.expr('law', 'M(t) (N·m, + = CCW)', ['t']), Fd.num('r', 'Arc radius (m)', 0.01, 0.02), Fd.degv('start', 'Start angle (°)'), Fd.degv('sweep', 'Sweep (°, sign = direction)'), Fd.tex('label', 'Label')],
   line: [Fd.sel('dash', 'Style', ['solid', 'dashed', 'dashdot']), Fd.num('weight', 'Weight (px)', 0.5, 0.5)],
   dim: [Fd.sel('orient', 'Orientation', ['aligned', 'horizontal', 'vertical']), Fd.num('off', 'Offset (m)', 0.05), Fd.tex('label', 'Label'), Fd.bool('showValue', 'Show current value')],
   angle: [Fd.num('rad', 'Arc radius (m)', 0.05, 0.05), Fd.sel('arrows', 'Arrowheads', ['end', 'both', 'none']), Fd.bool('showRef', 'Dash-dot reference line'), Fd.tex('label', 'Label'), Fd.bool('showValue', 'Show current value')],
@@ -1471,6 +1508,7 @@ function showPanel() {
   let h = `<h3>${META[o.type].name} <span class="note">${o.id}</span></h3>`;
   const fields = FIELDS[o.type] || [];
   fields.forEach((fd, i) => {
+    if (fd.when && !fd.when(o)) return;                     // field only applies in some modes
     if (fd.t === 'head') { h += `<h5>${fd.l}</h5>`; return; }
     if (fd.t === 'info') { h += `<div class="row"><label>${fd.l}</label><span>${esc(fd.fn(o))}</span></div>`; return; }
     if (fd.t === 'btn') { h += `<div class="row"><button data-i="${i}">${fd.l}</button></div>`; return; }
@@ -1479,7 +1517,7 @@ function showPanel() {
     if (fd.t === 'num') input = `<input type="number" data-i="${i}" step="${fd.step}" value="${+(+v).toFixed(4)}">`;
     if (fd.t === 'deg') input = `<input type="number" data-i="${i}" step="1" value="${+toDeg(v).toFixed(2)}">`;
     if (fd.t === 'bool') input = `<input type="checkbox" data-i="${i}" ${v ? 'checked' : ''}>`;
-    if (fd.t === 'sel') input = `<select data-i="${i}">${fd.o.map((op) => { const [val, txt] = Array.isArray(op) ? op : [op, op]; return `<option value="${val}" ${String(val) === String(v) ? 'selected' : ''}>${txt}</option>`; }).join('')}</select>`;
+    if (fd.t === 'sel') input = `<select data-i="${i}">${(typeof fd.o === 'function' ? fd.o(o) : fd.o).map((op) => { const [val, txt] = Array.isArray(op) ? op : [op, op]; return `<option value="${val}" ${String(val) === String(v) ? 'selected' : ''}>${txt}</option>`; }).join('')}</select>`;
     if (fd.t === 'tex' || fd.t === 'expr' || fd.t === 'text') input = `<input type="text" data-i="${i}" value="${esc(v ?? '')}">`;
     h += `<div class="row"><label>${fd.l}</label>${input}</div>`;
     if (fd.t === 'tex') h += `<div class="texprev" data-prev="${i}"></div>`;
@@ -1513,7 +1551,7 @@ function applyField(o, fd, el) {
   if (fd.t === 'num') { v = parseFloat(el.value); if (!isFinite(v)) return; if (fd.min != null) v = Math.max(fd.min, v); if (fd.max != null) v = Math.min(fd.max, v); }
   else if (fd.t === 'deg') { v = parseFloat(el.value); if (!isFinite(v)) return; v = toRad(v); }
   else if (fd.t === 'bool') v = el.checked;
-  else if (fd.t === 'sel') { v = el.value; if (/^-?\d+$/.test(v)) v = +v; }
+  else if (fd.t === 'sel') { v = el.value; if (/^-?\d+$/.test(v)) v = +v; else if (v === 'true' || v === 'false') v = v === 'true'; }
   else v = el.value;
   // Friction rule: mu_k can never exceed mu_s.
   if (fd.k === 'mu_k' && v > o.mu_s) { v = o.mu_s; msg('μ_k was capped at μ_s (μ_k ≤ μ_s).'); }
@@ -1530,7 +1568,7 @@ function updateTexPreview(el, tex) {
   if (s && e) { s.setAttribute('x', 0); s.setAttribute('y', 0); s.setAttribute('width', e.wEx * 9 + 'px'); s.setAttribute('height', e.hEx * 9 + 'px'); }
 }
 function checkExpr(el, fd, o) {
-  try { const fn = Expr.compile(String(o[fd.k]), fd.vars); const v = fn({ t: 1, d: 0, v: 0 }); el.textContent = '✓ ok (at t = 1 s: ' + (+v.toFixed(4)) + ')'; el.style.color = '#070'; }
+  try { const fn = Expr.compile(String(o[fd.k]), fd.vars); const v = fn({ t: 1, d: 0, v: 0, delta: 0 }); el.textContent = '✓ ok (at t = 1 s: ' + (+v.toFixed(4)) + ')'; el.style.color = '#070'; }
   catch (err) { el.textContent = '✗ ' + err.message; el.style.color = '#b00'; }
 }
 function settingsHTML() {
@@ -1542,7 +1580,9 @@ function settingsHTML() {
   <div class="row"><label>Snap to grid</label><input type="checkbox" id="sSnap" ${st.snapGrid ? 'checked' : ''}></div>
   <div class="row"><label>Label size (px)</label><input type="number" id="sLbl" value="${st.labelPx}" step="1" min="8"></div>
   <h5>Physics</h5>
-  <div class="row"><label>Gravity g (m/s²)</label><input type="number" id="sG" value="${st.g}" step="0.01"></div>
+  <div class="row"><label>Gravity</label><select id="sGm"><option value="uniform" ${st.gMode !== 'universal' ? 'selected' : ''}>uniform g (downward)</option><option value="universal" ${st.gMode === 'universal' ? 'selected' : ''}>universal G m₁m₂/r²</option></select></div>
+  ${st.gMode === 'universal' ? `<div class="row"><label>G (N·m²/kg²)</label><input type="number" id="sGG" value="${st.G}" step="0.1" min="0"></div><p class="note">Every pair of bodies attracts (fixed bodies too, using their mass). Real G is 6.674e-11; G = 1 makes orbits at sandbox size.</p>`
+    : `<div class="row"><label>Gravity g (m/s²)</label><input type="number" id="sG" value="${st.g}" step="0.01"></div>`}
   <div class="row"><label>Time step Δt</label><select id="sDt">${[120, 240, 480, 960].map((n) => `<option value="${n}" ${Math.abs(st.dt * n - 1) < 1e-9 ? 'selected' : ''}>1/${n} s</option>`).join('')}</select></div>
   <div class="row"><label>Bounce threshold (m/s)</label><input type="number" id="sRest" value="${st.restThreshold}" step="0.01" min="0"></div>
   <div class="row"><label>Velocity iterations</label><input type="number" id="sVel" value="${st.velIters}" step="1" min="1"></div>
@@ -1569,6 +1609,8 @@ function bindSettings() {
   bind('sSnap', (el) => { st.snapGrid = el.checked; });
   bind('sLbl', (el) => { const v = parseFloat(el.value); if (v > 4) st.labelPx = v; });
   bind('sG', (el) => { const v = parseFloat(el.value); if (isFinite(v)) st.g = v; });
+  bind('sGm', (el) => { st.gMode = el.value; setTimeout(showPanel); });
+  bind('sGG', (el) => { const v = parseFloat(el.value); if (v >= 0) st.G = v; });
   bind('sDt', (el) => { st.dt = 1 / +el.value; });
   bind('sRest', (el) => { const v = parseFloat(el.value); if (v >= 0) st.restThreshold = v; });
   bind('sVel', (el) => { const v = Math.round(parseFloat(el.value)); if (v >= 1) st.velIters = Math.min(500, v); });
@@ -1695,14 +1737,15 @@ function exBuilder(fn) {
 EX.ex1 = exBuilder((add, R) => {
   add('surface', { kind: 'polyline', pts: [{ x: 5.3, y: 1.9 }, { x: 0.15, y: 1.9 }, { x: 0.15, y: 0.15 }, { x: 5.3, y: 0.15 }], side: 1 });
   const m1 = add('block', { x: 2.35, y: 0.95, w: 3.0, h: 1.05, label: 'm_1' });
-  add('spring', { a: R(m1, 'r'), b: free(5.3, 0.95), style: 'coil', coils: 4, amp: 13, label: '' });
+  add('spring', { a: R(m1, 'r'), b: free(5.3, 0.95), style: 'coil', coils: 4, amp: 13, label: '', restLen: 1.45 });   // starts unstretched
   const p1 = add('pulley', { x: 1.6, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
   const p2 = add('pulley', { x: 3.4, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
   add('pin', { p: free(1.0, 4.05), mount: 'ground', mountAngle: 180, mountLen: 30 });
   add('axes', { p: free(1.0, 4.05), lenX: 0.85, lenY: 0.85, labelX: '{}_{\\mathrm{I}}\\vec{e}_1', labelY: '{}_{\\mathrm{I}}\\vec{e}_2' });
   add('rod', rodGeom({ x: 1.0, y: 4.05 }, { x: 1.4, y: 2.45 }));
   const big = add('disk', { x: 4.1, y: 4.3, r: 0.9, showR: true, angle: toRad(-28), label: 'm', labelDx: 1.0, labelDy: 0.9 });
-  add('spring', { a: R(big, 'c'), b: free(4.1, 6.3), style: 'coil', coils: 4, amp: 13, label: '' });
+  // rest length 2 - mg/k: the spring alone holds the disk's weight at the start, so the system starts in equilibrium
+  add('spring', { a: R(big, 'c'), b: free(4.1, 6.3), style: 'coil', coils: 4, amp: 13, label: '', restLen: +(2 - 9.81 / 100).toFixed(4) });
   const C = add('pointmass', { x: 3.62, y: 3.0, size: 7, label: '', mass: 0.01 });
   add('rope', { a: R(p1, 'r1'), b: R(C, 'c'), via: [{ id: big.id, s: -1 }] });
   add('rope', { a: R(C, 'c'), b: R(p2, 'r1') });
@@ -1713,7 +1756,7 @@ EX.ex1 = exBuilder((add, R) => {
 EX.ex2 = exBuilder((add, R) => {
   add('surface', { kind: 'polyline', pts: [{ x: 0, y: 3.0 }, { x: 0, y: 0 }, { x: 4.3, y: 0 }], side: 1 });
   const cart = add('cart', { x: 2.1, y: 0.715, w: 1.9, h: 0.95, wheelR: 0.12, label: 'm_1', labelDx: -0.8, labelDy: 0.33 });
-  add('actuator', { a: free(0, 1.19), b: R(cart, 'tl'), showRL: true, label: '' });
+  add('actuator', { a: free(0, 1.19), b: R(cart, 'tl'), showRL: true, label: '', mode: 'em', K: 1, RL: 1 });   // EM damper: c = K²/R_L
   add('spring', { a: free(0, 0.715), b: R(cart, 'l'), coils: 9, amp: 6, label: 'k_1', labelSide: 1, restLen: 1.15 });
   add('damper', { a: free(0, 0.4775), b: R(cart, 'l25'), label: 'C_1', labelSide: -1 });
   add('line', { a: free(2.1, 1.6), b: free(2.1, -0.95), dash: 'dashed' });
@@ -1725,6 +1768,8 @@ EX.ex2 = exBuilder((add, R) => {
   const end = L2W(rod, rod.len / 2, 0);
   const m2 = add('pointmass', { x: end.x + 1.05 * Math.cos(toRad(-70)), y: end.y + 1.05 * Math.sin(toRad(-70)), size: 11, label: 'm_2', labelDx: -0.4, labelDy: 0, collide: false });
   add('springdamper', { a: R(rod, 'b'), b: R(m2, 'c'), nonlinear: true, labelK: 'k_2, k_3', labelC: 'C_2', swap: true, restLen: 1.05 });
+  // Elastic pendulum: m2 slides along the rod's line on a hidden track that rides on the rod.
+  add('track', { a: R(rod, 'b'), b: free(end.x + 1.7 * Math.cos(toRad(-70)), end.y + 1.7 * Math.sin(toRad(-70))), show: false });
   add('force', { p: R(m2, 'c'), angle: -70, len: 0.55, label: 'F_2(t)' });
   add('force', { p: R(cart, 'r'), angle: 0, len: 0.8, label: 'F_1(t)' });
   add('moment', { p: R(cart, 'c'), r: 0.25, start: 210, sweep: -120, label: 'M(t)' });
@@ -1737,19 +1782,23 @@ EX.ex2 = exBuilder((add, R) => {
 });
 EX.ex3 = exBuilder((add, R) => {
   add('surface', { kind: 'line', pts: [{ x: -0.3, y: 5.0 }, { x: 4.9, y: 5.0 }], side: -1 });
-  const blk = add('block', { x: 2.6, y: 1.15, w: 3.1, h: 1.15, fill: 'white', label: '3m', labelDy: -0.1 });
+  const blk = add('block', { x: 2.6, y: 1.15, w: 3.1, h: 1.15, fill: 'white', label: '3m', labelDy: -0.1, mass: 3 });
+  // The block slides on a frictionless floor that the original drawing doesn't show (invisible surface).
+  add('surface', { kind: 'line', pts: [{ x: -0.3, y: 0.575 }, { x: 5.5, y: 0.575 }], side: 1, show: false, mu_s: 0, mu_k: 0 });
   const disk = add('disk', { x: 2.25, y: 2.225, r: 0.5, fill: 'white', showR: true, angle: toRad(40), label: '' });
-  add('line', { a: free(1.25, 1.725), b: free(1.25, 2.225), weight: 3 });
-  add('line', { a: free(3.95, 1.725), b: free(3.95, 2.225), weight: 3 });
-  const pl = add('pin', { p: free(1.25, 2.225) });
-  const pr = add('pin', { p: free(3.95, 2.225) });
+  // The two posts and their pins are part of the block: points given in the block's own frame ('@').
+  const onBlk = (x, y) => ({ ref: blk.id, a: '@', lx: x - blk.x, ly: y - blk.y, x, y });
+  add('line', { a: onBlk(1.25, 1.725), b: onBlk(1.25, 2.225), weight: 3 });
+  add('line', { a: onBlk(3.95, 1.725), b: onBlk(3.95, 2.225), weight: 3 });
+  const pl = add('pin', { p: onBlk(1.25, 2.225), host: blk.id });
+  const pr = add('pin', { p: onBlk(3.95, 2.225), host: blk.id });
   add('spring', { a: R(pl, 'c'), b: R(disk, 'c'), coils: 7, label: 'k', restLen: 1.0 });
   add('damper', { a: R(disk, 'c'), b: R(pr, 'c'), label: 'd' });
   const top = add('pin', { p: free(3.55, 4.75), mount: 'ground', mountAngle: 90, mountLen: 24 });
   const bob = add('pointmass', { x: 4.45, y: 3.35, style: 'bob', size: 11, label: '' });
   add('rod', { ...rodGeom({ x: 3.55, y: 4.75 }, { x: 4.45, y: 3.35 }), width: 6 });
   add('weld', { p: R(bob, 'c') });                     // the bob is fixed to the end of the rod (not drawn)
-  add('spring', { a: R(bob, 'c'), b: R(pr, 'c'), coils: 5, label: '2k', labelSide: -1, restLen: 1.2 });
+  add('spring', { a: R(bob, 'c'), b: R(pr, 'c'), coils: 5, label: '2k', labelSide: -1, restLen: 1.2, k: 200 });
   add('angle', { v: R(top, 'c'), r: free(3.55, 3.4), t: R(bob, 'c'), rad: 0.85, arrows: 'end', showRef: true, label: '\\varphi' });
   add('dim', { a: R(top, 'c'), b: R(bob, 'c'), off: -0.45, label: '\\ell' });
   add('coord', { p: free(0.85, 3.1), angle: 0, label: 'x_1' });
@@ -1790,6 +1839,8 @@ const SLIP_SPEED = 1e-3;        // m/s: contact sliding faster than this uses mu
 const OMEGA_DT_TARGET = 0.01;   // substep until omega*dt <= this (accuracy target for stiff springs)
 const MAX_SUBSTEPS = 400;
 const MASS_FLOOR = 1e-3;        // kg: a movable body can't have zero mass in Box2D
+const GRAV_EPS = 0.01;          // m: softening length for universal gravitation
+const IDEAL_PULLEY_ITERS = 300; // solver iterations when a rope runs over a moving massless pulley
 const PIN_TOL = 0.02;           // m: how close a pin must be to a body to grab it
 const NO_UD = { mu_s: 1, mu_k: 1, e: 0, stick: false, id: '?', tag: '?' };
 // Box2D lets touching shapes overlap by linearSlop (default 5 mm) and wraps polygons and edges in a
@@ -1864,10 +1915,12 @@ class Sim {
     const st = scene.settings;
     this.dt = st.dt; this.t = 0; this.tMid = 0; this.steps = 0;
     this.velIters = st.velIters; this.posIters = st.posIters;
-    this.warnings = [];
+    this.warnings = []; this.notes = [];
     // Box2D only bounces impacts faster than velocityThreshold (default 1 m/s). Lower it.
     planck.Settings.velocityThreshold = Math.max(1e-4, +st.restThreshold || 0);
-    this.world = new planck.World({ gravity: new planck.Vec2(0, -st.g), allowSleep: false });
+    this.universal = st.gMode === 'universal'; this.G = +st.G || 0;
+    // Uniform mode: Box2D adds g to every body. Universal mode: no uniform field; pair forces instead (Phase 4).
+    this.world = new planck.World({ gravity: new planck.Vec2(0, this.universal ? 0 : -st.g), allowSleep: false });
     this.ground = this.world.createBody();     // static body that holds every fixed surface
     this.recs = new Map();                     // scene id -> {o, body, m, I, ...}
     this.elements = [];                        // springs, dampers, actuators
@@ -1881,7 +1934,7 @@ class Sim {
     // Phase 3 bookkeeping: impulses applied during the current substep, and energy that left
     // the mechanical system (friction/impacts, dampers, ropes/joints) or entered it (applied loads).
     this.subQ = []; this.h = this.dt;
-    this.Eloss = { contact: 0, damper: 0, joint: 0 }; this.Win = 0;
+    this.Eloss = { contact: 0, damper: 0, joint: 0, drag: 0 }; this.Win = 0;
     this.buildSurfaces();
     this.buildBodies();
     this.glueFreePoints();
@@ -1889,6 +1942,13 @@ class Sim {
     this.buildElements();
     this.buildLoads();
     this.buildRopes();
+    // A moving ideal pulley is a near-massless body between two constraints. Box2D's iterative solver
+    // converges very slowly through it (tensions came out ~20% low at 30 iterations), so give it more.
+    if (this.ropes.some((sg) => sg.nodes.some((nd) => nd.body.isDynamic() && this.byBody.get(nd.body) && this.byBody.get(nd.body).ideal))) {
+      this.velIters = Math.max(this.velIters, IDEAL_PULLEY_ITERS);
+      this.notes.push(`moving ideal pulley: ${this.velIters} solver iterations`);
+    }
+    this.buildFieldForces();
     this.chooseSubsteps();
     this.listenContacts();
     this.dynRecs = [...this.recs.values()].filter((r) => r.body.isDynamic() && !r.ideal);
@@ -1932,8 +1992,9 @@ class Sim {
       switch (o.type) {
         case 'block': body.createFixture(box(o.w / 2, o.h / 2), fd()); break;
         case 'cart': {
-          // Phase 2 cart = "frictionless cart": the wheels touch the ground but have mu = 0.
           body.createFixture(box(o.w / 2, o.h / 2), fd());
+          if (o.rolling && !isStatic) break;                  // real wheels are separate bodies (buildWheels)
+          // "Frictionless cart": the wheels are part of the body and touch the ground with mu = 0.
           for (const sx of [-0.3, 0.3]) {
             const wheel = { ...ud, mu_s: 0, mu_k: 0, tag: sx < 0 ? 'wl' : 'wr' };     // tags keep the two wheels' normal forces apart
             body.createFixture(new planck.Circle(new planck.Vec2(o.w * sx, -o.h / 2 - o.wheelR), o.wheelR), fd(wheel));
@@ -1960,6 +2021,29 @@ class Sim {
         this.addJoint(new planck.RevoluteJoint({}, this.ground, body, new planck.Vec2(o.x, o.y)), 'pin', 'R', 'Axle reaction');
         this.link(this.ground, body, { type: 'pin', anchor: { x: o.x, y: o.y }, kappa: 0 });
       }
+      if (o.type === 'cart' && o.rolling && !isStatic) this.buildWheels(rec, ud, fd);
+    }
+  }
+  // Real rolling wheels: two solid-disk bodies pinned to the cart at their centers. Friction between
+  // the wheels and the ground makes them roll. Each wheel gets a stand-in object (not in the scene)
+  // so readouts, energy and graphs treat it like any other body.
+  buildWheels(rec, ud, fd) {
+    const o = rec.o, cb = rec.body, R = o.wheelR, mw = Math.max(1e-3, +o.wheelMass || 0);
+    const c = Math.cos(o.angle || 0), sn = Math.sin(o.angle || 0);
+    const vAlong = (+o.vx || 0) * c + (+o.vy || 0) * sn;          // cart speed along its own x axis
+    rec.wheels = []; rec.axleKeys = new Set();
+    for (const [sx, tag, side] of [[-0.3, 'wl', 'left'], [0.3, 'wr', 'right']]) {
+      const p = L2W(o, o.w * sx, -o.h / 2 - R);
+      const body = this.world.createBody({ type: 'dynamic', position: v2(p), angle: o.angle || 0,
+        linearVelocity: cb.getLinearVelocityFromWorldPoint(v2(p)), angularVelocity: (+o.omega || 0) - vAlong / R });   // start rolling, not skidding
+      body.createFixture(new planck.Circle(R), fd({ ...ud, id: o.id + '.' + tag, tag: 'b' }));
+      const I = 0.5 * mw * R * R;
+      body.setMassData({ mass: mw, center: new planck.Vec2(0, 0), I });
+      const proxy = { id: o.id + '.' + tag, type: 'disk', r: R, x: p.x, y: p.y, angle: o.angle || 0, mass: mw, shape: 'solid disk', label: '', drag: 'none' };
+      const w = { o: proxy, body, m: mw, I, ideal: false, angle0: o.angle || 0, c0: { x: p.x, y: p.y }, name: `${rec.name} ${side} wheel`, links: [], ledger: new Map(), vs: null, vp: null, a: { x: NaN, y: NaN, al: NaN }, wheelOf: rec };
+      this.recs.set(proxy.id, w); this.byBody.set(body, w); rec.wheels.push(w);
+      this.addJoint(new planck.RevoluteJoint({}, cb, body, v2(p)), 'pin', 'R_{axle}', `Axle (${side} wheel)`);
+      rec.axleKeys.add('jt:' + (this.joints.length - 1));
     }
   }
   // Create a Box2D joint and remember it so its reaction force can be read after every substep.
@@ -1986,24 +2070,52 @@ class Sim {
     const p = P(pt);
     let rec = null;
     if (pt && pt.ref) {
-      const o = byId(pt.ref);
-      if (o && this.recs.has(o.id)) rec = this.recs.get(o.id);
-      else if (o && (o.type === 'pin' || o.type === 'weld' || isMasslessRod(o))) rec = this.bodiesAt(p, refBodyId(pt))[0] || null;
+      const o = byId(pt.ref), bid = refBodyId(pt);
+      if (bid && this.recs.has(bid)) rec = this.recs.get(bid);               // on a body (directly, or via a pin mounted on it)
+      else if (o && (o.type === 'pin' || o.type === 'weld' || isMasslessRod(o))) rec = this.bodiesAt(p)[0] || null;
     }
     const body = rec ? rec.body : this.ground;
     return { body, local: body.getLocalPoint(v2(p)), rec };
   }
   // "Glue": a pin, weld, force or moment placed on a movable body (but not snapped to an anchor)
   // should ride along with that body, so turn its free point into a body-local '@' reference.
+  // "Mounted on" (o.host) overrides this: a point mounted on a body rides with it even when it's
+  // off the body (like a bracket), and a point mounted on the ground never moves.
   glueFreePoints() {
+    const glue = (pt, r) => { const q = P(pt), l = W2L(r.o, q); return { ref: r.o.id, a: '@', lx: l.x, ly: l.y, x: q.x, y: q.y }; };
     for (const o of scene.objects) {
-      if (!['pin', 'weld', 'force', 'moment'].includes(o.type) || !o.p || o.p.ref) continue;
-      if (o.type === 'pin' && o.mount === 'ground') continue;
-      const hit = this.bodiesAt(o.p).find((r) => r.body.isDynamic());
-      if (!hit) continue;
-      const l = W2L(hit.o, o.p);
-      o.p = { ref: hit.o.id, a: '@', lx: l.x, ly: l.y, x: o.p.x, y: o.p.y };
+      if (o.type === 'track') { this.glueTrack(o, glue); continue; }
+      if (!['pin', 'weld', 'force', 'moment'].includes(o.type) || !o.p || o.host === 'ground') continue;
+      let hit = null;
+      if (o.host && this.recs.has(o.host)) hit = this.recs.get(o.host);
+      else if (!o.p.ref && !(o.type === 'pin' && o.mount === 'ground')) hit = this.bodiesAt(o.p).find((r) => r.body.isDynamic());
+      if (!hit || !hit.body.isDynamic() || refBodyId(o.p) === hit.o.id) continue;
+      o.p = glue(o.p, hit);
     }
+  }
+  // A track rides on a moving body if you mount it there, or (auto) if one end is attached to a moving
+  // body and some OTHER body sits on the track (e.g. a collar on a swinging rod).
+  glueTrack(o, glue) {
+    if (o.host === 'ground') return;
+    const explicit = o.host && this.recs.has(o.host);
+    const hostId = explicit ? o.host : (refBodyId(o.a) || refBodyId(o.b));
+    const hr = hostId && this.recs.get(hostId);
+    if (!hr || !hr.body.isDynamic()) return;
+    if (!explicit && !this.onTrack(o, hr).length) return;       // nothing else on it: an ordinary fixed track
+    for (const k of ['a', 'b']) if (refBodyId(o[k]) !== hostId) o[k] = glue(o[k], hr);
+    o._host = hostId;
+  }
+  // Movable bodies whose center lies on the track (excluding its host), with their position s along it.
+  onTrack(o, host) {
+    const a = P(o.a), b = P(o.b), L = V.dist(a, b), out = [];
+    if (L < 1e-6) return out;
+    const u = V.unit(V.sub(b, a)), tol = Math.max(PIN_TOL, o.width / 2 / scene.settings.pxPerM);
+    for (const r of this.recs.values()) {
+      if (!r.body.isDynamic() || r === host || r.wheelOf) continue;
+      const d = V.sub(r.o, a), s = V.dot(d, u), off = Math.abs(V.cross(u, d));
+      if (off <= tol && s >= -tol && s <= L + tol) out.push({ r, s, u, L });
+    }
+    return out;
   }
 
   /* ---- Rigid joints (Box2D constraints) ---- */
@@ -2015,10 +2127,17 @@ class Sim {
     }
   }
   buildPin(o) {
-    const p = P(o.p), list = this.bodiesAt(p, refBodyId(o.p));
+    const p = P(o.p), rid = refBodyId(o.p);
+    let list = this.bodiesAt(p, rid);
+    const own = rid && this.recs.get(rid);                         // the body it's attached to, even if off its outline
+    if (own && !list.includes(own)) list.unshift(own);
     if (!list.some((r) => r.body.isDynamic())) return;
     const pairs = [];
-    if ((o.type === 'pin' && o.mount === 'ground') || list.length === 1) {
+    const host = o.host && o.host !== 'ground' ? this.recs.get(o.host) : null;
+    if (host) {
+      // Mounted on a body: join it to every other body here. Alone, it's only an attachment point.
+      for (const r of list) if (r !== host && (host.body.isDynamic() || r.body.isDynamic())) pairs.push([host.body, r.body]);
+    } else if ((o.type === 'pin' && o.mount === 'ground') || o.host === 'ground' || list.length === 1) {
       for (const r of list) if (r.body.isDynamic()) pairs.push([this.ground, r.body]);
     } else {
       for (const r of list.slice(1)) if (list[0].body.isDynamic() || r.body.isDynamic()) pairs.push([list[0].body, r.body]);
@@ -2044,19 +2163,15 @@ class Sim {
   buildTrack(o) {
     // Any movable body whose center lies on the track slides along it. Without "may rotate" it's a
     // prismatic joint (no rotation, the track ends are stops). With it, a wheel joint (free spin).
-    const a = P(o.a), b = P(o.b), L = V.dist(a, b);
-    if (L < 1e-6) return;
-    const u = V.unit(V.sub(b, a)), tol = Math.max(PIN_TOL, o.width / 2 / scene.settings.pxPerM);
-    for (const r of this.recs.values()) {
-      if (!r.body.isDynamic()) continue;
-      const d = V.sub(r.o, a), s = V.dot(d, u), off = Math.abs(V.cross(u, d));
-      if (off > tol || s < -tol || s > L + tol) continue;
+    // A track mounted on a moving body (o._host, set by glueTrack) joins that body to the slider instead of the ground.
+    const host = o._host ? this.recs.get(o._host) : null, A = host ? host.body : this.ground;
+    for (const { r, s, u, L } of this.onTrack(o, host)) {
       const c = new planck.Vec2(r.o.x, r.o.y);
       const j = o.rotate
-        ? new planck.WheelJoint({ frequencyHz: 0, dampingRatio: 0 }, this.ground, r.body, c, v2(u))
-        : new planck.PrismaticJoint({ enableLimit: true, lowerTranslation: -s, upperTranslation: L - s }, this.ground, r.body, c, v2(u));
+        ? new planck.WheelJoint({ frequencyHz: 0, dampingRatio: 0 }, A, r.body, c, v2(u))
+        : new planck.PrismaticJoint({ enableLimit: true, lowerTranslation: -s, upperTranslation: L - s }, A, r.body, c, v2(u));
       this.addJoint(j, 'track', 'N_t', `Track force (${o.id})`, true);
-      this.link(this.ground, r.body, { type: 'track', axis: u });
+      this.link(A, r.body, { type: 'track', axis: u });
     }
   }
 
@@ -2067,8 +2182,12 @@ class Sim {
       const el = { o, A: this.attach(o.a), B: this.attach(o.b), T: 0, L: 0, Ldot: 0 };
       if (!el.A.body.isDynamic() && !el.B.body.isDynamic()) continue;
       el.u0 = V.unit(V.sub(el.B.body.getWorldPoint(el.B.local), el.A.body.getWorldPoint(el.A.local)));   // direction at t = 0
-      if (o.type === 'actuator') {
-        try { el.law = Expr.compile(String(o.law), ['t', 'd', 'v']); } catch (err) { el.law = () => 0; this.warn(`Actuator ${o.id}: ${err.message} (using F = 0).`); }
+      if (o.type === 'actuator' && o.mode === 'em') {
+        // Electromagnetic damper: back-EMF K v drives current K v / R_L, force K i = (K^2 / R_L) v opposing the motion.
+        el.em = true; el.c = o.K * o.K / Math.max(1e-9, o.RL);
+        el.law = (q) => -el.c * q.v;
+      } else if (o.type === 'actuator') {
+        try { el.law = Expr.compile(String(o.law), ['t', 'd', 'v', 'delta']); } catch (err) { el.law = () => 0; this.warn(`Actuator ${o.id}: ${err.message} (using F = 0).`); }
       }
       this.elements.push(el);
     }
@@ -2082,7 +2201,7 @@ class Sim {
     const o = el.o, d = L - o.restLen, T = { s: 0, d: 0, a: 0 };
     if (o.type === 'spring' || o.type === 'springdamper') T.s = o.nonlinear ? o.k2 * d + o.k3 * d * d * d : o.k * d;
     if (o.type === 'damper' || o.type === 'springdamper') T.d = o.c * Ldot;
-    if (o.type === 'actuator') T.a = -el.law({ t: this.tMid, d, v: Ldot });
+    if (o.type === 'actuator') T.a = -el.law({ t: this.tMid, d, v: Ldot, delta: d });
     return T;
   }
   applyElement(el) {
@@ -2100,7 +2219,8 @@ class Sim {
     B.applyForce(new planck.Vec2(-u.x * T, -u.y * T), pB, true);
     // Log each part as an impulse (force x substep time) for the free-body diagram and energy bookkeeping.
     const rA = V.sub(pA, A.getWorldCenter()), rB = V.sub(pB, B.getWorldCenter()), h = this.h, id = el.o.id;
-    for (const [val, key, kind, tex, what] of [[parts.s, 'sp:', 'spring', 'F_s', 'Spring'], [parts.d, 'dp:', 'damper', 'F_d', 'Damper'], [parts.a, 'ac:', 'actuator', 'F_a', 'Actuator']]) {
+    const act = el.em ? ['damper', 'F_{EM}', 'EM damper'] : ['actuator', 'F_a', 'Actuator'];   // an EM damper turns energy into heat in R_L
+    for (const [val, key, kind, tex, what] of [[parts.s, 'sp:', 'spring', 'F_s', 'Spring'], [parts.d, 'dp:', 'damper', 'F_d', 'Damper'], [parts.a, 'ac:', ...act]]) {
       if (!val) continue;
       this.push(A, key + id, kind, tex, `${what} (${id})`, u.x * val * h, u.y * val * h, rA, 0);
       this.push(B, key + id, kind, tex, `${what} (${id})`, -u.x * val * h, -u.y * val * h, rB, 0);
@@ -2161,8 +2281,9 @@ class Sim {
         if (nodes[i].kind !== 'grip' && i !== nodes.length - 1) continue;
         const segNodes = nodes.slice(start, i + 1).map((nd) => ({ ...nd }));
         start = i;
-        const bodies = [...new Set(segNodes.map((nd) => nd.body))].filter((b) => b.isDynamic());
+        const all = new Set(segNodes.map((nd) => nd.body)), bodies = [...all].filter((b) => b.isDynamic());
         if (!bodies.length) continue;                            // rope between two fixed things: nothing to do
+        if (all.size === 1) continue;                            // both ends on one body (rope wound on a yo-yo): nothing to constrain
         const seg = new RopeSegment(this, segNodes, first ? +o.slack || 0 : 0);
         first = false;
         seg.ropeId = o.id; seg.impStep = 0; seg.Tavg = 0;
@@ -2174,6 +2295,38 @@ class Sim {
         if (bodies.length >= 2) this.link(bodies[0], bodies[1], { type: 'rope' });
         else if (segNodes.length === 2) this.link(segNodes[0].body, segNodes[1].body, { type: 'rope', len: seg.Lrest, pa: posePt(segNodes[0].body.m_sweep, segNodes[0].local || { x: 0, y: 0 }), pb: posePt(segNodes[1].body.m_sweep, segNodes[1].local || { x: 0, y: 0 }) });
       }
+    }
+  }
+
+  /* ---- Air resistance and universal gravitation (Phase 4) ---- */
+  buildFieldForces() {
+    this.dragged = [...this.recs.values()].filter((r) => r.body.isDynamic() && (r.o.drag === 'linear' || r.o.drag === 'quadratic'));
+    // Every body with mass attracts every other. Fixed bodies attract too, using the mass typed in
+    // the panel (Box2D treats fixed bodies as having no mass).
+    this.attractors = !this.universal ? [] : [...this.recs.values()]
+      .filter((r) => !r.ideal && (r.body.isDynamic() ? r.m > 0 : +r.o.mass > 0))
+      .map((r) => ({ r, m: r.body.isDynamic() ? r.m : +r.o.mass }));
+  }
+  applyDrag(r) {
+    const b = r.body, v = b.getLinearVelocity(), speed = Math.hypot(v.x, v.y);
+    if (!speed) return;
+    const k = r.o.drag === 'linear' ? r.o.dragB : r.o.dragC * speed;  // F = -k v: k = b (linear) or c|v| (quadratic)
+    const F = { x: -k * v.x, y: -k * v.y };
+    b.applyForceToCenter(new planck.Vec2(F.x, F.y), true);
+    this.push(b, 'drag', 'drag', 'F_D', r.o.drag === 'linear' ? 'Air resistance (−b v)' : 'Air resistance (−c |v| v)', F.x * this.h, F.y * this.h, null, 0);
+  }
+  // Newton's law of gravitation for each pair: F = G m1 m2 / r^2, pulling them together.
+  // r^2 gets a tiny softening (GRAV_EPS) so two bodies passing through each other don't blow up.
+  applyUniversalGravity() {
+    const A = this.attractors, h = this.h;
+    for (let i = 0; i < A.length; i++) for (let j = i + 1; j < A.length; j++) {
+      const a = A[i], b = A[j], da = a.r.body.isDynamic(), db = b.r.body.isDynamic();
+      if (!da && !db) continue;
+      const ca = a.r.body.getWorldCenter(), cb = b.r.body.getWorldCenter();
+      const dx = cb.x - ca.x, dy = cb.y - ca.y, r2 = dx * dx + dy * dy + GRAV_EPS * GRAV_EPS, r = Math.sqrt(r2);
+      const F = this.G * a.m * b.m / r2, fx = F * dx / r, fy = F * dy / r;         // force on a, toward b
+      if (da) { a.r.body.applyForceToCenter(new planck.Vec2(fx, fy), true); this.push(a.r.body, 'grav:' + b.r.o.id, 'gravity', 'F_g', `Gravity from ${b.r.name}`, fx * h, fy * h, null, 0); }
+      if (db) { b.r.body.applyForceToCenter(new planck.Vec2(-fx, -fy), true); this.push(b.r.body, 'grav:' + a.r.o.id, 'gravity', 'F_g', `Gravity from ${a.r.name}`, -fx * h, -fy * h, null, 0); }
     }
   }
 
@@ -2199,6 +2352,21 @@ class Sim {
       if (o.type === 'damper' || o.type === 'springdamper') rate = Math.max(rate, Math.abs(o.c) * mInv);
     }
     for (const ts of this.torsions) rate = Math.max(rate, Math.sqrt(ts.k * (ts.A.m_invI + ts.B.m_invI)));
+    for (const el of this.elements) if (el.em) {                     // EM damper behaves like a damper with c = K^2/R_L
+      const pA = el.A.body.getWorldPoint(el.A.local), pB = el.B.body.getWorldPoint(el.B.local), u = V.unit(V.sub(pB, pA));
+      rate = Math.max(rate, el.c * (this.invMassAlong(el.A, u) + this.invMassAlong(el.B, u)));
+    }
+    // Air drag: linear relaxes at rate b/m; quadratic at 2c|v|/m (estimated at the larger of v0 and terminal speed).
+    for (const r of this.dragged) {
+      if (r.o.drag === 'linear') { rate = Math.max(rate, r.o.dragB / r.m); continue; }
+      const g = Math.abs(scene.settings.g), vt = g > 0 && r.o.dragC > 0 ? Math.sqrt(r.m * g / r.o.dragC) : 0;
+      rate = Math.max(rate, 2 * r.o.dragC * Math.max(1, vt, Math.hypot(+r.o.vx || 0, +r.o.vy || 0)) / r.m);
+    }
+    // Orbits: angular speed sqrt(G (m1 + m2) / r^3) for each pair.
+    for (let i = 0; i < this.attractors.length; i++) for (let j = i + 1; j < this.attractors.length; j++) {
+      const a = this.attractors[i], b = this.attractors[j], d = Math.max(GRAV_EPS, V.dist(a.r.body.getWorldCenter(), b.r.body.getWorldCenter()));
+      rate = Math.max(rate, Math.sqrt(this.G * (a.m + b.m) / d ** 3));
+    }
     const need = Math.ceil(rate * this.dt / OMEGA_DT_TARGET);
     this.sub = Math.min(MAX_SUBSTEPS, Math.max(1, need));
     this.omegaDt = rate * this.dt / this.sub;
@@ -2277,7 +2445,8 @@ class Sim {
       for (const el of this.elements) this.applyElement(el);
       for (const ld of this.loads) this.applyLoad(ld);
       for (const ts of this.torsions) this.applyTorsion(ts);
-      this.pushGravity();
+      for (const r of this.dragged) this.applyDrag(r);
+      if (this.universal) this.applyUniversalGravity(); else this.pushGravity();
       // 2. Box2D: add gravity + forces to velocities, solve joints/contacts/ropes, move the bodies.
       //    (Contact impulses are logged by the post-solve callback while this runs.)
       this.world.step(h, this.velIters, this.posIters);
@@ -2300,6 +2469,7 @@ class Sim {
     for (const r of this.recs.values()) {
       const p = r.body.getPosition();
       r.o.x = p.x; r.o.y = p.y; r.o.angle = r.body.getAngle();
+      if (r.wheels) r.o.wheelAng = r.wheels.map((w) => w.body.getAngle());
     }
     for (const rl of this.rodLinks) Object.assign(rl.o, rodGeom(rl.ea.body.getWorldPoint(rl.ea.local), rl.eb.body.getWorldPoint(rl.eb.local)));
     for (const ld of this.loads) if (ld.o.type === 'force' && ld.o.frame === 'body') ld.o.angle = ld.angle0 + toDeg(ld.at.body.getAngle() - ld.theta0);
@@ -2379,6 +2549,7 @@ class Sim {
       // Energy bookkeeping. Gravity, springs and torsion springs are conservative (they're in U).
       if (it.kind === 'normal' || it.kind === 'friction') this.Eloss.contact -= W;
       else if (it.kind === 'damper') this.Eloss.damper -= W;
+      else if (it.kind === 'drag') this.Eloss.drag -= W;
       else if (it.kind === 'tension' || it.kind === 'pin' || it.kind === 'weld' || it.kind === 'rod' || it.kind === 'track') this.Eloss.joint -= W;
       else if (it.kind === 'applied' || it.kind === 'moment' || it.kind === 'actuator') this.Win += W;
     }
@@ -2456,7 +2627,14 @@ class Sim {
       const v = r.body.getLinearVelocity(), w = r.body.getAngularVelocity();
       K += 0.5 * r.m * (v.x * v.x + v.y * v.y);
       Kr += 0.5 * r.I * w * w;
-      Ug += r.m * g * r.body.getPosition().y;
+      if (!this.universal) Ug += r.m * g * r.body.getPosition().y;
+    }
+    // Universal mode: U_g = -G m1 m2 / r for each pair (same softening as the force, so energy is conserved).
+    const A = this.attractors || [];
+    for (let i = 0; i < A.length; i++) for (let j = i + 1; j < A.length; j++) {
+      if (!A[i].r.body.isDynamic() && !A[j].r.body.isDynamic()) continue;
+      const d2 = V.dist(A[i].r.body.getWorldCenter(), A[j].r.body.getWorldCenter()) ** 2 + GRAV_EPS * GRAV_EPS;
+      Ug -= this.G * A[i].m * A[j].m / Math.sqrt(d2);
     }
     for (const el of this.elements) {
       const o = el.o;
@@ -2467,7 +2645,7 @@ class Sim {
     for (const ts of this.torsions) { const d = ts.B.getAngle() - ts.A.getAngle() - ts.rel0; Us += 0.5 * ts.k * d * d; }
     // Energy that left as heat (friction, impacts, dampers, rope jerks) and work put in by applied loads.
     // total = K + U + E_th - W_in should stay constant: that's the "energy adds up" check.
-    const Eth = this.Eloss.contact + this.Eloss.damper + this.Eloss.joint;
+    const Eth = this.Eloss.contact + this.Eloss.damper + this.Eloss.joint + this.Eloss.drag;
     const mech = K + Kr + Ug + Us;
     return { K, Kr, Ug, Us, Eth, Win: this.Win, mech, total: mech + Eth - this.Win };
   }
@@ -2695,6 +2873,7 @@ function updateSimUI() {
   $('tRead').textContent = `t = ${(run.sim ? run.sim.t : 0).toFixed(3)} s`;
   const w = run.sim ? [...run.sim.warnings] : [];
   if (run.sim && run.sim.sub > 1) w.unshift(`${run.sim.sub} substeps/step`);
+  if (run.sim) w.unshift(...run.sim.notes);
   if (run.slow) w.push('slower than real time');
   $('simWarn').textContent = w.join(' · ');
   $('simWarn').title = w.join('\n');
@@ -2933,7 +3112,116 @@ const TESTS = [
     const pass = m1 && t1 && m2 && t2 && relErr(m1.T, t1.T) <= 0.01 && relErr(m2.T, t2.T) <= 0.01 && relErr(t2.T, TAU * Math.sqrt(2 / (3 * 9.81))) < 1e-6;
     return { meas: m1 && t1 && m2 && t2 ? `simple ${m1.T.toFixed(4)} vs ${t1.T.toFixed(4)} s; physical ${m2.T.toFixed(4)} vs ${t2.T.toFixed(4)} s` : 'not recognized', exp: 'measured within 1% of 2π√(L/g) and 2π√(I_P/(m g d))', pass };
   } },
+
+  /* ---- Phase 4: advanced elements ---- */
+  { group: 'Phase 4 advanced elements', name: 'Cart on 30°: real rolling wheels vs frictionless wheels', run() {
+    // body 1 kg + two 0.5 kg solid-disk wheels: a = M_tot g sin(theta) / (M_tot + m_w) (each wheel adds I/R^2 = m_w/2)
+    const cart = (rolling) => inclineScene(0.5, 0.5, (add) => add('cart', { ...onIncline(6, 0.1 + 0.2), w: 0.6, h: 0.2, wheelR: 0.1, angle: INC, mass: 1, rolling, wheelMass: 0.5 }));
+    const aR = accelAlong(cart(true), 1, V.mul(INC_U, -1), 0.3, 1).a, aF = accelAlong(cart(false), 1, V.mul(INC_U, -1), 0.3, 1).a;
+    const wantR = 2 * 9.81 * Math.sin(INC) / 2.5, wantF = 9.81 * Math.sin(INC);
+    return { meas: `rolling a = ${aR.toFixed(4)}, frictionless a = ${aF.toFixed(4)} m/s²`, exp: `${wantR.toFixed(3)} and ${wantF.toFixed(3)} m/s² (±1%)`, pass: relErr(aR, wantR) <= 0.01 && relErr(aF, wantF) <= 0.01 };
+  } },
+  { name: 'Elastic pendulum (mass on a slider along a pinned rod)', run() {
+    // Hanging straight down: the mass bobs along the rod with T = 2 pi sqrt(m/k) and the rod stays vertical.
+    const build = (deg) => testScene((add, R) => {
+      const th = toRad(deg), u = { x: Math.sin(th), y: -Math.cos(th) }, at = (d) => ({ x: u.x * d, y: 2 + u.y * d });
+      const rod = add('rod', { ...rodGeom(at(0), at(1)), mass: 0.5, collide: false });
+      add('pin', { p: R(rod, 'a'), mount: 'ground' });
+      const m = add('pointmass', { ...at(1.5), mass: 1, collide: false });
+      add('track', { a: R(rod, 'b'), b: free(at(2.5).x, at(2.5).y), show: false });
+      add('spring', { a: R(rod, 'b'), b: R(m, 'c'), k: 100, restLen: 0.5 });
+    });
+    const sc = build(0), ts = [], vs = [];
+    let th = 0, b;
+    const sim = simulate(sc, 3, (s) => { b = b || recOf(s, sc.objects[2]); ts.push(s.t); vs.push(b.getLinearVelocity().y); th = Math.max(th, Math.abs(recOf(s, sc.objects[0]).getAngle() - Math.PI / 2 + Math.PI)); });
+    const T = periodFromCrossings(ts, vs), rodTilt = Math.abs(Math.sin(recOf(sim, sc.objects[0]).getAngle() - sc.objects[0].angle));
+    // Swinging from 30°: no friction or damping, so the total energy must stay put.
+    const sc2 = build(30);
+    let worst = 0, E0;
+    simulate(sc2, 4, (s) => { const E = s.energy().total; if (E0 === undefined) E0 = s.E0.total; worst = Math.max(worst, Math.abs(E - E0)); });
+    const scale = 1.5 * 9.81 * 1.5;                                       // rough size of the energy that sloshes around
+    return { meas: `radial T = ${T.toFixed(4)} s, rod tilt ${rodTilt.toExponential(1)}; swinging: worst |ΔE| = ${(100 * worst / scale).toFixed(2)}%`, exp: 'T = 0.6283 s ±1%, no tilt, energy ±1%', pass: relErr(T, TAU / 10) <= 0.01 && rodTilt < 1e-4 && worst / scale <= 0.01 };
+  } },
+  { name: 'Disk rolling on a block pushed by F = 10 N', run() {
+    // Block M = 3 on a frictionless floor, solid disk m = 1 rolling on it: a_block = F/(M + m/3), a_disk = a_block/3.
+    const sc = testScene((add, R) => {
+      add('surface', { kind: 'line', pts: [{ x: -5, y: 0 }, { x: 10, y: 0 }], mu_s: 0, mu_k: 0 });
+      const b = add('block', { x: 0, y: 0.25, w: 4, h: 0.5, mass: 3, mu_s: 0.5, mu_k: 0.5 });
+      add('disk', { x: 0, y: 0.8, r: 0.3, mass: 1, mu_s: 0.5, mu_k: 0.5 });
+      add('force', { p: R(b, 'c'), angle: 0, law: '10' });
+    });
+    const ex = { x: 1, y: 0 }, aB = accelAlong(sc, 1, ex, 0.3, 1).a, run2 = accelAlong(sc, 2, ex, 0.3, 1), aD = run2.a;
+    const roll = withScene(sc, () => rollingInfo(run2.sim.recs.get(sc.objects[2].id)));
+    return { meas: `a_block = ${aB.toFixed(4)}, a_disk = ${aD.toFixed(4)} m/s², ${roll.rolling ? 'rolling' : 'slipping'} on the block`, exp: 'a_block = 3.000, a_disk = 1.000 (±1%), rolling', pass: relErr(aB, 3) <= 0.01 && relErr(aD, 1) <= 0.01 && roll.rolling };
+  } },
+  { name: 'Moving pulleys: block and tackle, ideal and massive', run() {
+    // Rope: ceiling -> under a moving pulley -> over a fixed pulley -> block m = 1 kg.
+    const build = (pm) => testScene((add, R) => {
+      const P1 = add('pulley', { x: 0, y: 1.5, r: 0.3, mass: pm, fixed: false, collide: false });
+      const P2 = add('pulley', { x: 0.6, y: 3.2, r: 0.3, mass: 0, fixed: true, collide: false });
+      const m = add('block', { x: 0.9, y: 1.5, w: 0.2, h: 0.2, mass: 1 });
+      add('rope', { a: free(-0.3, 3), b: R(m, 't'), via: [{ id: P1.id, s: 1 }, { id: P2.id, s: -1 }] });
+      if (!pm) { const M = add('block', { x: 0, y: 0.8, w: 0.3, h: 0.3, mass: 3 }); add('rope', { a: R(P1, 'c'), b: R(M, 't') }); }
+    });
+    const up = { x: 0, y: 1 };
+    const a1 = accelAlong(build(0), 2, up, 0.3, 0.8).a, a2 = accelAlong(build(4), 2, up, 0.2, 0.7).a;
+    const w1 = 2 * (3 - 2) * 9.81 / (3 + 4), w2 = 2 * (4 - 2) * 9.81 / (1.5 * 4 + 4);
+    return { meas: `m accelerates up at ${a1.toFixed(4)} (3 kg load, ideal pulley) and ${a2.toFixed(4)} m/s² (4 kg disk pulley)`, exp: `${w1.toFixed(3)} and ${w2.toFixed(3)} m/s² (±1%)`, pass: relErr(a1, w1) <= 0.01 && relErr(a2, w2) <= 0.01 };
+  } },
+  { name: 'Yo-yo: rope unwinding from a falling solid disk', run() {
+    const sc = testScene((add, R) => { const d = add('disk', { x: 0, y: 1, r: 0.2, mass: 1 }); add('rope', { a: free(-0.2, 2), b: R(d, 'r6'), via: [{ id: d.id, s: 1 }] }); });
+    const res = accelAlong(sc, 0, { x: 0, y: -1 }, 0.2, 0.5);
+    const T = [...res.sim.recs.get(sc.objects[0].id).ledger.values()].find((e) => e.kind === 'tension');
+    const Tm = Math.hypot(T.F.x, T.F.y);
+    return { meas: `a = ${res.a.toFixed(4)} m/s², T = ${Tm.toFixed(4)} N`, exp: `a = 2g/3 = ${(2 * 9.81 / 3).toFixed(3)}, T = mg/3 = ${(9.81 / 3).toFixed(3)} (±1%)`, pass: relErr(res.a, 2 * 9.81 / 3) <= 0.01 && relErr(Tm, 9.81 / 3) <= 0.01 };
+  } },
+  { name: 'Disk hanging in a rope loop (no-slip, two segments)', run() {
+    const sc = testScene((add, R) => { const d = add('disk', { x: 0, y: 1, r: 0.5, mass: 2 }); add('rope', { a: free(-0.5, 2.5), b: free(0.5, 2.5), via: [{ id: d.id, s: 1 }] }); });
+    const sim = simulate(sc, 1), b = recOf(sim, sc.objects[0]);
+    const Ts = sim.ropes.map((sg) => sg.Tavg), v = Math.hypot(b.getLinearVelocity().x, b.getLinearVelocity().y);
+    return { meas: `T = ${Ts.map((x) => x.toFixed(3)).join(', ')} N, disk speed ${v.toExponential(1)} m/s`, exp: 'T = Mg/2 = 9.81 N each (±1%), at rest', pass: Ts.length === 2 && Ts.every((x) => relErr(x, 9.81) <= 0.01) && v < 1e-3 };
+  } },
+  { name: 'EM damper (c = K²/R_L) = ordinary damper', run() {
+    const build = (em) => testScene((add, R) => {
+      add('surface', { kind: 'line', pts: [{ x: -2, y: 0 }, { x: 3, y: 0 }], mu_s: 0, mu_k: 0 });
+      const b = add('block', { x: 0.1, y: 0.2, w: 0.4, h: 0.4, mass: 1 });
+      add('spring', { a: free(-1, 0.2), b: R(b, 'l'), k: 100, restLen: 0.8 });
+      if (em) add('actuator', { a: free(-1, 0.25), b: R(b, 'l75'), mode: 'em', K: 2, RL: 4, restLen: 0.8 });
+      else add('damper', { a: free(-1, 0.25), b: R(b, 'l75'), c: 1 });
+    });
+    const xs = [[], []];
+    let Eem = 0, worst = 0, E0;
+    [false, true].forEach((em, k) => {
+      const sc = build(em);
+      const sim = simulate(sc, 3, (s) => { xs[k].push(recOf(s, sc.objects[1]).getPosition().x); if (em) { const E = s.energy(); if (E0 === undefined) E0 = s.E0.total; worst = Math.max(worst, Math.abs(E.total - E0)); } });
+      if (em) Eem = withScene(sc, () => sim.energy()).Eth;
+    });
+    const diff = Math.max(...xs[0].map((x, i) => Math.abs(x - xs[1][i])));
+    return { meas: `max |x_EM − x_damper| = ${diff.toExponential(1)} m; heat in R_L ${Eem.toFixed(4)} J, energy total ±${(100 * worst / 0.5).toFixed(2)}%`, exp: 'identical motion, energy adds up (±1%)', pass: diff < 1e-9 && worst / 0.5 <= 0.01 };
+  } },
+  { name: 'Air resistance: linear and quadratic, falling from rest', run() {
+    const fall = (drag) => testScene((add) => add('disk', { x: 0, y: 10, r: 0.1, mass: 1, drag, dragB: 2, dragC: 0.1 }));
+    const v1 = (drag) => { const sc = fall(drag), sim = simulate(sc, 1); return -recOf(sim, sc.objects[0]).getLinearVelocity().y; };
+    const vl = v1('linear'), vq = v1('quadratic'), vt = Math.sqrt(9.81 / 0.1);
+    const wl = 9.81 / 2 * (1 - Math.exp(-2)), wq = vt * Math.tanh(9.81 / vt);
+    return { meas: `v(1 s) = ${vl.toFixed(4)} (linear), ${vq.toFixed(4)} m/s (quadratic)`, exp: `${wl.toFixed(4)} = (mg/b)(1 − e^(−bt/m)); ${wq.toFixed(4)} = v_t tanh(g t / v_t) (±0.5%)`, pass: relErr(vl, wl) <= 0.005 && relErr(vq, wq) <= 0.005 };
+  } },
+  { name: 'Universal gravitation: circular orbit (G = 1, M = 1000 kg, r = 5 m)', run() {
+    const sc = testScene((add) => { add('disk', { x: 0, y: 0, r: 0.3, mass: 1000, fixed: true }); add('disk', { x: 5, y: 0, r: 0.1, mass: 1, vy: Math.sqrt(1000 / 5) }); });
+    sc.settings.gMode = 'universal'; sc.settings.G = 1;
+    const ts = [], vs = [];
+    let rMax = 0, worst = 0, E0;
+    simulate(sc, 5, (s) => { const b = recOf(s, sc.objects[1]), p = b.getPosition(); ts.push(s.t); vs.push(b.getLinearVelocity().x); rMax = Math.max(rMax, Math.abs(Math.hypot(p.x, p.y) - 5) / 5); const E = s.energy().total; if (E0 === undefined) E0 = s.E0.total; worst = Math.max(worst, Math.abs(E - E0) / Math.abs(E0)); });
+    const T = periodFromCrossings(ts, vs), want = TAU * Math.sqrt(125 / 1000);
+    return { meas: `T = ${T.toFixed(4)} s, radius within ${(100 * rMax).toFixed(3)}%, energy within ${(100 * worst).toFixed(3)}%`, exp: `T = 2π√(r³/GM) = ${want.toFixed(4)} s ±1%, r ±0.5%, E ±1%`, pass: relErr(T, want) <= 0.01 && rMax <= 0.005 && worst <= 0.01 };
+  } },
 ];
+// Average acceleration of scene object k along unit vector u between times t1 and t2.
+function accelAlong(sc, k, u, t1, t2) {
+  let v1 = NaN, v2 = NaN, b;
+  const sim = simulate(sc, t2, (s) => { b = b || recOf(s, sc.objects[k]); const v = V.dot(b.getLinearVelocity(), u); if (s.steps === Math.round(t1 / s.dt)) v1 = v; v2 = v; });
+  return { a: (v2 - v1) / (t2 - t1), sim };
+}
 
 async function runTests() {
   if (run.playing) { run.playing = false; updateSimUI(); }
@@ -3086,7 +3374,7 @@ function measuredPeriod(sim, r) {
 }
 // Recognize a textbook oscillator from how the body is connected (rec.links, built in Section 16).
 function textbookPeriod(sim, r) {
-  const g = Math.abs(scene.settings.g), m = r.m, fixed = (b) => !b.isDynamic(), by = (t) => r.links.filter((l) => l.type === t);
+  const g = sim.universal ? 0 : Math.abs(scene.settings.g), m = r.m, fixed = (b) => !b.isDynamic(), by = (t) => r.links.filter((l) => l.type === t);
   const pins = by('pin'), welds = by('weld'), tracks = by('track'), rods = by('rod').concat(by('rope').filter((l) => l.len));
   const springs = sim.elements.filter((el) => (el.A.body === r.body || el.B.body === r.body) && (el.o.type === 'spring' || el.o.type === 'springdamper'));
   const damped = sim.elements.some((el) => (el.A.body === r.body || el.B.body === r.body) && el.o.type !== 'spring' && (el.o.type !== 'springdamper' || el.o.c));
@@ -3114,6 +3402,34 @@ function textbookPeriod(sim, r) {
     return { T: TAU * Math.sqrt(m / k), formula: springs.length > 1 ? '2π√(m / k), k = k₁ + k₂ + …' : '2π√(m / k)', name: 'spring-mass' + note };
   }
   return null;
+}
+
+/* ---- What the FBD and force table show for a body ----
+   A cart with real wheels is shown as ONE system (body + both wheels), the way a textbook draws it:
+   the axle forces between body and wheels are internal (equal and opposite) so they're left out, the
+   weights are combined into one mg at the system's center of mass, and the check is
+   sum F = M a_cm with M the total mass. */
+function viewOf(r) {
+  if (!r.wheels) return { name: r.name, m: r.m, a: r.a, Fnet: r.Fnet || { x: 0, y: 0 }, tauNet: r.tauNet || 0, I: r.I, entries: [...r.ledger.values()], sys: false };
+  const parts = [r, ...r.wheels], entries = [];
+  let M = 0, max = 0, may = 0, cx = 0, cy = 0, grav = null;
+  for (const q of parts) {
+    const c = q.body.getWorldCenter();
+    M += q.m; max += q.m * q.a.x; may += q.m * q.a.y; cx += q.m * c.x; cy += q.m * c.y;
+    for (const e of q.ledger.values()) {
+      if (r.axleKeys.has(e.key)) continue;
+      if (e.key === 'g') {
+        if (!grav) grav = { ...e, desc: 'Gravity (weight of body + wheels)', F: { x: 0, y: 0 }, W: 0, P: 0, tau: 0 };
+        grav.F = { x: grav.F.x + e.F.x, y: grav.F.y + e.F.y }; grav.W += e.W; grav.P += e.P; grav.active = grav.active || e.active;
+        continue;
+      }
+      entries.push(q === r ? e : { ...e, desc: `${e.desc} (${q === r.wheels[0] ? 'left' : 'right'} wheel)` });
+    }
+  }
+  if (grav) { grav.p = { x: cx / M, y: cy / M }; entries.unshift(grav); }
+  let fx = 0, fy = 0;
+  for (const e of entries) { fx += e.F.x; fy += e.F.y; }
+  return { name: r.name + ' + wheels', m: M, a: { x: max / M, y: may / M, al: NaN }, Fnet: { x: fx, y: fy }, tauNet: NaN, I: NaN, entries, sys: true };
 }
 
 /* ---- Readouts in the properties panel ---- */
@@ -3150,7 +3466,7 @@ function bodyReadouts(sim, r) {
   h += row('Net torque about O', num(tauO, 'N·m'));
   h += row('K (translational)', num(0.5 * m * (v.x * v.x + v.y * v.y), 'J'));
   h += row('K (rotational)', num(0.5 * r.I * w * w, 'J'));
-  h += row('U_g = m g y', num(m * g * c.y, 'J'));
+  if (!sim.universal) h += row('U_g = m g y', num(m * g * c.y, 'J'));
   h += row('I about center', num(r.I, 'kg·m²'));
   for (const l of r.links.filter((x) => x.type === 'pin')) {
     const d = V.dist(l.anchor, r.c0);
@@ -3167,13 +3483,14 @@ function bodyReadouts(sim, r) {
     if (tp) h += row('Period (textbook)', `${num(tp.T, 's')} <span class="note">${tp.name}: ${tp.formula}</span>` + (mp ? ` <span class="note">(${num(100 * (mp.T - tp.T) / tp.T)}% diff)</span>` : ''));
   }
   // Newton's 2nd law check
-  const okF = near(Fn.x, m * r.a.x) && near(Fn.y, m * r.a.y), okT = near(r.tauNet || 0, r.I * r.a.al);
-  h += row('ΣF (all forces below)', vecTxt(Fn.x, Fn.y, 'N'));
-  h += row('m a', vecTxt(m * r.a.x, m * r.a.y, 'N') + (okF ? ' <span class="pass">✓</span>' : ''));
-  h += row('Στ about center / I α', `${num(r.tauNet || 0)} / ${num(r.I * r.a.al)} N·m` + (okT ? ' <span class="pass">✓</span>' : ''));
+  const vw = viewOf(r), okF = near(vw.Fnet.x, vw.m * vw.a.x) && near(vw.Fnet.y, vw.m * vw.a.y), okT = near(r.tauNet || 0, r.I * r.a.al);
+  if (vw.sys) h += row('System', `body + 2 wheels, M = ${num(vw.m, 'kg')} (axle forces are internal)`);
+  h += row('ΣF (all forces below)', vecTxt(vw.Fnet.x, vw.Fnet.y, 'N'));
+  h += row(vw.sys ? 'M a_cm' : 'm a', vecTxt(vw.m * vw.a.x, vw.m * vw.a.y, 'N') + (okF ? ' <span class="pass">✓</span>' : ''));
+  if (!vw.sys) h += row('Στ about center / I α', `${num(r.tauNet || 0)} / ${num(r.I * r.a.al)} N·m` + (okT ? ' <span class="pass">✓</span>' : ''));
   h += '</table>';
   // Forces with their work and power
-  const es = [...r.ledger.values()].filter((e) => e.active || Math.abs(e.W) > 1e-9);
+  const es = vw.entries.filter((e) => e.active || Math.abs(e.W) > 1e-9);
   if (es.length) {
     h += '<table class="ro forces"><tr><th>Force</th><th>Size</th><th>Work W</th><th>Power</th></tr>';
     for (const e of es) {
@@ -3208,8 +3525,8 @@ function systemReadouts(sim) {
   const scale = Math.max(1e-9, Math.abs(E0 - sim.E0.Ug) + Math.abs(E.K) + Math.abs(E.Kr) + Math.abs(E.Us) + Math.abs(E.Ug - sim.E0.Ug) + Math.abs(E.Eth) + Math.abs(E.Win));
   let h = `<div class="roh">System · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
   h += row('K translational', num(E.K, 'J')) + row('K rotational', num(E.Kr, 'J'));
-  h += row('U_g (from y = 0)', num(E.Ug, 'J')) + row('U_s (springs)', num(E.Us, 'J'));
-  h += row('Thermal E_th', `${num(E.Eth, 'J')} <span class="note">friction/impacts ${num(sim.Eloss.contact)}, dampers ${num(sim.Eloss.damper)}, ropes/joints ${num(sim.Eloss.joint)}</span>`);
+  h += row(sim.universal ? 'U_g = −Σ G m₁m₂/r' : 'U_g (from y = 0)', num(E.Ug, 'J')) + row('U_s (springs)', num(E.Us, 'J'));
+  h += row('Thermal E_th', `${num(E.Eth, 'J')} <span class="note">friction/impacts ${num(sim.Eloss.contact)}, dampers ${num(sim.Eloss.damper)}, air ${num(sim.Eloss.drag)}, ropes/joints ${num(sim.Eloss.joint)}</span>`);
   h += row('Work in by applied loads', num(E.Win, 'J'));
   h += row('Total K + U + E_th − W_in', `${num(E.total, 'J')} <span class="note">change since t = 0: ${num(dE, 'J')} (${num(100 * dE / scale)}%)</span>`);
   h += row('Momentum p', vecTxt(P.px, P.py, 'kg·m/s'));
@@ -3221,7 +3538,7 @@ function refreshReadouts() { const ro = $('ro'); if (ro) ro.innerHTML = readoutH
 
 /* ---- Free-body diagram (floating box over the canvas) ---- */
 const KIND_COLOR = { gravity: '#333333', normal: '#1f6fd1', friction: '#e07b00', tension: '#2a9d4b', spring: '#8e44ad', damper: '#8a5a2b', actuator: '#b03060',
-  applied: '#d1495b', moment: '#d1495b', torsion: '#8e44ad', pin: '#666666', weld: '#666666', rod: '#666666', track: '#666666' };
+  applied: '#d1495b', moment: '#d1495b', torsion: '#8e44ad', pin: '#666666', weld: '#666666', rod: '#666666', track: '#666666', drag: '#17a2b8' };
 // Number repeated symbols: N, N -> N_1, N_2 (or f_k^{(1)} when the symbol already has a subscript).
 function numberLabels(es) {
   const count = {}, seen = {};
@@ -3256,7 +3573,8 @@ function drawFBD() {
     info.innerHTML = !sim || !sim.steps ? 'Press <b>Play</b> or <b>Step</b>, then select a body.' : 'Select a moving body.';
     return;
   }
-  $('fbdName').textContent = r.name;
+  const view = viewOf(r);
+  $('fbdName').textContent = view.name;
   svg.style.display = '';
   const W = 340, H = 290, cx = W / 2, cy = H / 2;
   const b = r.body, c = b.getWorldCenter(), th = b.getAngle(), cs = Math.cos(th), sn = Math.sin(th);
@@ -3267,7 +3585,7 @@ function drawFBD() {
   // Extended style: the body's outline, each force drawn from the point where it acts (shows torques).
   const dot = ana.fbdStyle === 'dot' || (ana.fbdStyle === 'auto' && ['block', 'cart', 'pointmass'].includes(r.o.type));
   let out = dot ? '' : fbdBodyShape(r.o, bodyS, s);
-  const es = [...r.ledger.values()].filter((e) => e.active && (Math.hypot(e.F.x, e.F.y) > 1e-9 || Math.abs(e.M) > 1e-9));
+  const es = view.entries.filter((e) => e.active && (Math.hypot(e.F.x, e.F.y) > 1e-9 || Math.abs(e.M) > 1e-9));
   const names = numberLabels(es);
   const Fmax = Math.max(1e-12, ...es.map((e) => Math.hypot(e.F.x, e.F.y)));
   es.forEach((e, i) => {
@@ -3294,9 +3612,10 @@ function drawFBD() {
   });
   out += `<circle cx="${cx}" cy="${cy}" r="${dot ? 5 : 2.5}" fill="#000"/>`;
   svg.innerHTML = out;
-  const Fn = r.Fnet, m = r.m, okF = near(Fn.x, m * r.a.x) && near(Fn.y, m * r.a.y), okT = near(r.tauNet, r.I * r.a.al);
-  info.innerHTML = `ΣF = ${vecTxt(Fn.x, Fn.y, 'N')}<br>m·a = ${vecTxt(m * r.a.x, m * r.a.y, 'N')} ${okF ? '<span class="pass">✓ equal</span>' : '<span class="fail">≠</span>'}<br>` +
-    `Στ<sub>cm</sub> = ${num(r.tauNet, 'N·m')}, I·α = ${num(r.I * r.a.al, 'N·m')} ${okT ? '<span class="pass">✓</span>' : '<span class="fail">≠</span>'}`;
+  const Fn = view.Fnet, m = view.m, a = view.a, okF = near(Fn.x, m * a.x) && near(Fn.y, m * a.y), okT = near(r.tauNet, r.I * r.a.al);
+  info.innerHTML = `ΣF = ${vecTxt(Fn.x, Fn.y, 'N')}<br>${view.sys ? 'M·a<sub>cm</sub>' : 'm·a'} = ${vecTxt(m * a.x, m * a.y, 'N')} ${okF ? '<span class="pass">✓ equal</span>' : '<span class="fail">≠</span>'}<br>` +
+    (view.sys ? '<span class="note">Cart + wheels as one system: axle forces are internal and left out.</span>'
+      : `Στ<sub>cm</sub> = ${num(r.tauNet, 'N·m')}, I·α = ${num(r.I * r.a.al, 'N·m')} ${okT ? '<span class="pass">✓</span>' : '<span class="fail">≠</span>'}`);
 }
 
 /* =====================================================================
