@@ -1,0 +1,6 @@
+# editor / OS clutter
+.DS_Store
+Thumbs.db
+*.tmp
+# local copies pulled out of git history
+mechanics-sandbox-phase1.html

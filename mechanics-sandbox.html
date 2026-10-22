@@ -1,0 +1,1592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mechanics Sandbox</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  MECHANICS SANDBOX - Phase 1 (editor + textbook look)
+  ----------------------------------------------------
+  One self-contained file. Sections in the <script> below:
+    1. Utilities (vector math)
+    2. Safe expression parser (no eval)
+    3. Settings, view, scene model
+    4. Object types: defaults, anchors, point fields
+    5. LaTeX labels (MathJax SVG)
+    6. SVG drawing primitives (hatching, arrows, springs, dampers...)
+    7. Per-type renderers
+    8. Rendering the whole scene + overlay
+    9. Snapping
+   10. Tools (creating objects)
+   11. Mouse / keyboard interaction
+   12. Properties panel
+   13. Undo/redo, clipboard, delete
+   14. Save / load / export
+   15. Example scenes (the 4 reference diagrams)
+   16. Startup
+  Coordinates: the scene is stored in METERS with +y UP (textbook convention).
+  Only the renderer converts to screen pixels (where SVG's +y is DOWN).
+-->
+<style>
+  :root { --ui: #f4f4f4; --line: #c8c8c8; --sel: #2a6fdb; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font: 13px/1.35 system-ui, "Segoe UI", sans-serif; color: #111; background: #fff; }
+  body { display: flex; flex-direction: column; }
+  #topbar { display: flex; gap: 6px; align-items: center; padding: 5px 8px; border-bottom: 1px solid var(--line); background: var(--ui); flex-wrap: wrap; }
+  #topbar .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  button, select { font: inherit; padding: 3px 8px; border: 1px solid #aaa; background: #fff; border-radius: 3px; cursor: pointer; }
+  button:hover { background: #eee; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #tools { width: 132px; overflow-y: auto; border-right: 1px solid var(--line); background: var(--ui); padding: 4px; }
+  #tools h4 { margin: 8px 2px 3px; font-size: 11px; text-transform: uppercase; color: #666; font-weight: 600; }
+  #tools button { display: block; width: 100%; text-align: left; margin: 1px 0; padding: 3px 6px; border-color: transparent; background: transparent; }
+  #tools button.active { background: #fff; border-color: #888; font-weight: 600; }
+  #wrap { flex: 1; position: relative; min-width: 0; }
+  #svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #fff; touch-action: none; user-select: none; }
+  #props { width: 290px; overflow-y: auto; border-left: 1px solid var(--line); background: var(--ui); padding: 8px; }
+  #props h3 { margin: 0 0 6px; font-size: 14px; }
+  #props h5 { margin: 10px 0 4px; font-size: 11px; text-transform: uppercase; color: #666; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .row label { flex: 0 0 118px; color: #333; }
+  .row input[type=number], .row input[type=text], .row select { flex: 1; min-width: 0; padding: 2px 4px; border: 1px solid #aaa; border-radius: 3px; font: inherit; }
+  .row input.bad { border-color: #c00; background: #fee; }
+  .texprev { min-height: 26px; padding: 3px 6px; background: #fff; border: 1px solid #ddd; margin: 2px 0 2px 124px; }
+  .texprev svg { max-width: 100%; }
+  .quick { margin-left: 124px; display: flex; flex-wrap: wrap; gap: 2px; }
+  .quick button { padding: 0 5px; font-size: 12px; }
+  .note { color: #666; font-size: 12px; margin: 4px 0; }
+  .err { color: #b00; font-size: 12px; }
+  #status { display: flex; gap: 16px; padding: 3px 8px; border-top: 1px solid var(--line); background: var(--ui); font-size: 12px; color: #333; }
+  #exactBox { display: none; }
+  #exactBox input { width: 110px; }
+  /* editor-only overlay styling (never exported) */
+  .obj { cursor: pointer; }
+  #overlay { pointer-events: none; }
+  #overlay .handle { pointer-events: all; cursor: crosshair; }
+</style>
+
+<!-- MathJax configuration must exist BEFORE the MathJax script loads -->
+<script>
+  window.MathJax = {
+    tex: { packages: { '[+]': [] } },
+    svg: { fontCache: 'local' },          // glyph defs live inside each label's <svg>, so exports are self-contained
+    startup: {
+      typeset: false,
+      ready: function () {
+        MathJax.startup.defaultReady();
+        MathJax.startup.promise.then(function () { if (window.onMathReady) window.onMathReady(); });
+      }
+    }
+  };
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+</head>
+<body>
+<div id="topbar">
+  <button id="bNew" title="New empty scene">New</button>
+  <button id="bOpen" title="Load scene JSON">Open…</button>
+  <button id="bSave" title="Save scene JSON">Save</button>
+  <select id="examples"><option value="">Examples…</option>
+    <option value="ex1">Ref 1: channel, pulleys, disk</option>
+    <option value="ex2">Ref 2: cart + elastic pendulum</option>
+    <option value="ex3">Ref 3: disk on 3m block</option>
+    <option value="ex4">Ref 4: block in channel + lever</option>
+  </select>
+  <span class="sep"></span>
+  <button id="bUndo" title="Ctrl+Z">Undo</button>
+  <button id="bRedo" title="Ctrl+Y">Redo</button>
+  <button id="bDel" title="Delete">Delete</button>
+  <span class="sep"></span>
+  <button id="bFit" title="F">Fit view</button>
+  <button id="bSvg">Export SVG</button>
+  <button id="bPng">Export PNG</button>
+  <span class="sep"></span>
+  <span id="exactBox">Length, angle°: <input id="exact" type="text" placeholder="e.g. 2, 30"> (Enter)</span>
+  <input id="fileIn" type="file" accept=".json,application/json" style="display:none">
+</div>
+<div id="main">
+  <div id="tools"></div>
+  <div id="wrap">
+    <svg id="svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <g id="gridG"></g>
+      <g id="sceneG"></g>
+      <g id="overlay"></g>
+    </svg>
+  </div>
+  <div id="props"></div>
+</div>
+<div id="status"><span id="stPos">x = 0.00 m, y = 0.00 m</span><span id="stHint"></span><span id="stMsg"></span></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   1. UTILITIES
+   Small 2D vector helpers. Points are plain objects {x, y}
+   (like a Python dict or a namedtuple).
+   ===================================================================== */
+const V = {
+  add: (a, b) => ({ x: a.x + b.x, y: a.y + b.y }),
+  sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y }),
+  mul: (a, s) => ({ x: a.x * s, y: a.y * s }),
+  len: (a) => Math.hypot(a.x, a.y),
+  dist: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
+  unit: (a) => { const L = Math.hypot(a.x, a.y) || 1; return { x: a.x / L, y: a.y / L }; },
+  perp: (a) => ({ x: -a.y, y: a.x }),            // rotate +90 degrees
+  dot: (a, b) => a.x * b.x + a.y * b.y,
+  cross: (a, b) => a.x * b.y - a.y * b.x,        // z-component of the 3D cross product
+  dir: (ang) => ({ x: Math.cos(ang), y: Math.sin(ang) }),
+};
+const toDeg = (r) => r * 180 / Math.PI;
+const toRad = (d) => d * Math.PI / 180;
+const TAU = 2 * Math.PI;
+const mod = (a, n) => ((a % n) + n) % n;
+const f = (n) => Math.round(n * 100) / 100;      // trim numbers written into SVG
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const $ = (id) => document.getElementById(id);
+
+/* =====================================================================
+   2. SAFE EXPRESSION PARSER
+   Turns text like "5 sin(2t)" into a function of variables, WITHOUT eval().
+   Grammar (recursive descent, one function per rule):
+     expr    := term (('+' | '-') term)*
+     term    := unary (('*' | '/' | implicit) unary)*
+     unary   := ('-' | '+') unary | power
+     power   := primary ('^' unary)?
+     primary := number | name | name '(' args ')' | '(' expr ')'
+   compile() returns a JavaScript closure - think of it as building a tree of
+   Python lambdas, then calling the root lambda with a dict of variables.
+   ===================================================================== */
+const Expr = (function () {
+  const FUNCS = {
+    sin: Math.sin, cos: Math.cos, tan: Math.tan, exp: Math.exp, sqrt: Math.sqrt,
+    abs: Math.abs, log: Math.log, sign: Math.sign, min: Math.min, max: Math.max,
+    step: (x) => (x >= 0 ? 1 : 0),               // Heaviside step u(x)
+  };
+  const CONSTS = { pi: Math.PI, e: Math.E };
+
+  function tokenize(src) {
+    const toks = [];
+    let i = 0;
+    while (i < src.length) {
+      const c = src[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (/[0-9.]/.test(c)) {
+        const m = /^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/.exec(src.slice(i));
+        if (!m) throw new Error('Bad number at ' + i);
+        toks.push({ t: 'num', v: parseFloat(m[0]) }); i += m[0].length; continue;
+      }
+      if (/[A-Za-z_]/.test(c)) {
+        const m = /^[A-Za-z_][A-Za-z_0-9]*/.exec(src.slice(i));
+        toks.push({ t: 'name', v: m[0] }); i += m[0].length; continue;
+      }
+      if ('+-*/^(),'.includes(c)) { toks.push({ t: c }); i++; continue; }
+      throw new Error('Unexpected "' + c + '"');
+    }
+    return toks;
+  }
+
+  function compile(src, allowedVars) {
+    const toks = tokenize(src);
+    let pos = 0;
+    const peek = () => toks[pos];
+    const take = (t) => { if (!toks[pos] || toks[pos].t !== t) throw new Error('Expected "' + t + '"'); return toks[pos++]; };
+
+    function expr() {
+      let left = term();
+      while (peek() && (peek().t === '+' || peek().t === '-')) {
+        const op = toks[pos++].t, a = left, b = term();
+        left = op === '+' ? (v) => a(v) + b(v) : (v) => a(v) - b(v);
+      }
+      return left;
+    }
+    function startsPrimary(tk) { return tk && (tk.t === 'num' || tk.t === 'name' || tk.t === '('); }
+    function term() {
+      let left = unary();
+      while (peek() && (peek().t === '*' || peek().t === '/' || startsPrimary(peek()))) {
+        let op = '*';
+        if (peek().t === '*' || peek().t === '/') op = toks[pos++].t;   // otherwise implicit "2t"
+        const a = left, b = unary();
+        left = op === '*' ? (v) => a(v) * b(v) : (v) => a(v) / b(v);
+      }
+      return left;
+    }
+    function unary() {
+      if (peek() && peek().t === '-') { pos++; const a = unary(); return (v) => -a(v); }
+      if (peek() && peek().t === '+') { pos++; return unary(); }
+      return power();
+    }
+    function power() {
+      const base = primary();
+      if (peek() && peek().t === '^') { pos++; const ex = unary(); return (v) => Math.pow(base(v), ex(v)); }
+      return base;
+    }
+    function primary() {
+      const tk = toks[pos++];
+      if (!tk) throw new Error('Unexpected end');
+      if (tk.t === 'num') { const c = tk.v; return () => c; }
+      if (tk.t === '(') { const e = expr(); take(')'); return e; }
+      if (tk.t === 'name') {
+        if (peek() && peek().t === '(' && FUNCS[tk.v]) {
+          pos++;
+          const args = [expr()];
+          while (peek() && peek().t === ',') { pos++; args.push(expr()); }
+          take(')');
+          const fn = FUNCS[tk.v];
+          return (v) => fn(...args.map((a) => a(v)));
+        }
+        if (tk.v in CONSTS) { const c = CONSTS[tk.v]; return () => c; }
+        if (allowedVars.includes(tk.v)) { const name = tk.v; return (v) => v[name]; }
+        throw new Error('Unknown name "' + tk.v + '"');
+      }
+      throw new Error('Unexpected "' + tk.t + '"');
+    }
+    const fn = expr();
+    if (pos < toks.length) throw new Error('Extra input after position ' + pos);
+    return fn;
+  }
+  return { compile };
+})();
+
+/* =====================================================================
+   3. SETTINGS, VIEW, SCENE MODEL
+   scene.objects is a flat list (like a Python list of dicts). Objects that
+   connect to others store references {ref: id, a: anchorName} instead of
+   coordinates, so they follow when the target moves.
+   ===================================================================== */
+let scene = newScene();
+function newScene() {
+  return { version: 1, nextId: 1, settings: { pxPerM: 100, grid: 0.1, showGrid: true, snapGrid: true, labelPx: 19 }, objects: [] };
+}
+const view = { ox: 60, oy: 500, zoom: 1, get ppm() { return scene.settings.pxPerM * this.zoom; } };
+
+// world (m, y up) <-> screen (px, y down)
+function S(p) { return { x: view.ox + p.x * view.ppm, y: view.oy - p.y * view.ppm }; }
+function W(s) { return { x: (s.x - view.ox) / view.ppm, y: (view.oy - s.y) / view.ppm }; }
+
+const byId = (id) => scene.objects.find((o) => o.id === id);
+const uid = () => 'o' + (scene.nextId++);
+
+/* =====================================================================
+   4. OBJECT TYPES
+   DEF[type]() gives default properties. META tells the editor which fields
+   are points (possibly anchored) and the drawing layer order.
+   ===================================================================== */
+const PHYS = () => ({ mass: 1, fixed: false, mu_s: 1.0, mu_k: 1.0, e: 0, labelDx: 0, labelDy: 0 });
+const DEF = {
+  surface: () => ({ kind: 'line', pts: [], side: 1, hatch: true, mu_s: 0.5, mu_k: 0.3, e: 0 }),
+  block: () => ({ x: 0, y: 0, w: 1.2, h: 0.7, angle: 0, fill: 'gray', label: 'm', ...PHYS() }),
+  cart: () => ({ x: 0, y: 0, w: 1.4, h: 0.6, angle: 0, wheelR: 0.11, fill: 'white', rolling: false, label: 'm', ...PHYS() }),
+  disk: () => ({ x: 0, y: 0, r: 0.4, angle: 0, fill: 'gray', shape: 'solid disk', centerPin: true, showR: false, rLabel: 'r', label: '', ...PHYS() }),
+  rod: () => ({ x: 0, y: 0, len: 1, angle: 0, width: 3, label: '', ...PHYS(), mass: 0.5 }),
+  pointmass: () => ({ x: 0, y: 0, style: 'mass', size: 9, label: 'm', ...PHYS(), labelDx: 0.22, labelDy: 0.12 }),
+  pulley: () => ({ x: 0, y: 0, r: 0.17, angle: 0, fill: 'white', mount: 'none', mountAngle: -90, mountLen: 30, label: '', ...PHYS(), fixed: true, mass: 0 }),
+  pin: () => ({ p: { x: 0, y: 0 }, mount: 'none', mountAngle: -90, mountLen: 24, torsionK: 0 }),
+  track: () => ({ a: { x: 0, y: 0 }, b: { x: 1, y: 0 }, width: 12, hatch: false }),
+  spring: () => ({ a: null, b: null, style: 'zigzag', coils: 8, amp: 8, nonlinear: false, k: 100, k2: 100, k3: 0, restLen: 1, label: 'k', labelSide: 1 }),
+  damper: () => ({ a: null, b: null, c: 1, label: 'c', labelSide: 1 }),
+  springdamper: () => ({ a: null, b: null, style: 'zigzag', coils: 6, amp: 7, nonlinear: false, k: 100, k2: 100, k3: 0, c: 1, restLen: 1, labelK: 'k', labelC: 'c', swap: false }),
+  actuator: () => ({ a: null, b: null, law: '0', showRL: false, label: '', labelRL: 'R_L', K: 1, RL: 1, labelSide: 1 }),
+  rope: () => ({ a: null, b: null, via: [], label: '' }),
+  force: () => ({ p: null, angle: 0, len: 0.7, at: 'tail', frame: 'world', law: '5', label: 'F' }),
+  moment: () => ({ p: null, r: 0.25, start: 200, sweep: -110, law: '1', label: 'M' }),
+  line: () => ({ a: null, b: null, dash: 'solid', weight: 1 }),
+  dim: () => ({ a: null, b: null, orient: 'aligned', off: 0.3, label: '\\ell', showValue: false }),
+  angle: () => ({ v: null, r: null, t: null, rad: 0.45, arrows: 'end', showRef: true, label: '\\theta', showValue: false }),
+  coord: () => ({ p: { x: 0, y: 0 }, angle: 0, label: 'x_1' }),
+  axes: () => ({ p: { x: 0, y: 0 }, angle: 0, lenX: 0.8, lenY: 0.8, yDir: 1, labelX: 'X', labelY: 'Y' }),
+  gravity: () => ({ p: { x: 0, y: 0 }, len: 0.35, label: 'g' }),
+  leader: () => ({ a: null, b: null, label: 'A' }),
+  text: () => ({ p: { x: 0, y: 0 }, label: 'A' }),
+};
+const META = {
+  surface: { layer: 0, name: 'Surface' },
+  track: { layer: 1, pts: ['a', 'b'], name: 'Slider track' },
+  block: { layer: 2, body: true, rot: true, name: 'Block' },
+  cart: { layer: 2, body: true, rot: true, name: 'Cart' },
+  disk: { layer: 2, body: true, rot: true, name: 'Disk' },
+  rod: { layer: 2, body: true, rot: true, name: 'Rod' },
+  pointmass: { layer: 2, body: true, name: 'Point mass' },
+  pulley: { layer: 2, body: true, name: 'Pulley' },
+  spring: { layer: 3, pts: ['a', 'b'], conn: true, name: 'Spring' },
+  damper: { layer: 3, pts: ['a', 'b'], conn: true, name: 'Damper' },
+  springdamper: { layer: 3, pts: ['a', 'b'], conn: true, name: 'Spring + damper' },
+  actuator: { layer: 3, pts: ['a', 'b'], conn: true, name: 'Actuator' },
+  rope: { layer: 4, pts: ['a', 'b'], name: 'Rope' },
+  pin: { layer: 5, pts: ['p'], name: 'Pin' },
+  force: { layer: 6, pts: ['p'], name: 'Force' },
+  moment: { layer: 6, pts: ['p'], name: 'Moment' },
+  line: { layer: 7, pts: ['a', 'b'], name: 'Line' },
+  dim: { layer: 7, pts: ['a', 'b'], name: 'Dimension' },
+  angle: { layer: 7, pts: ['v', 'r', 't'], name: 'Angle arc' },
+  coord: { layer: 7, pts: ['p'], name: 'Coordinate marker' },
+  axes: { layer: 7, pts: ['p'], name: 'Axes' },
+  gravity: { layer: 7, pts: ['p'], name: 'Gravity arrow' },
+  leader: { layer: 7, pts: ['a', 'b'], name: 'Leader line' },
+  text: { layer: 7, pts: ['p'], name: 'Label' },
+};
+
+// Body-local coordinates -> world. (lx, ly) are measured in the body's own rotated frame.
+function L2W(o, lx, ly) {
+  const c = Math.cos(o.angle || 0), s = Math.sin(o.angle || 0);
+  return { x: o.x + c * lx - s * ly, y: o.y + s * lx + c * ly };
+}
+
+// Every snap-able point on an object, as [{name, p}] in world coords.
+function anchorsOf(o) {
+  const out = [];
+  const add = (name, p) => out.push({ name, p });
+  switch (o.type) {
+    case 'block': case 'cart': {
+      const hw = o.w / 2, hh = o.h / 2;
+      add('c', L2W(o, 0, 0));
+      add('tl', L2W(o, -hw, hh)); add('tr', L2W(o, hw, hh)); add('bl', L2W(o, -hw, -hh)); add('br', L2W(o, hw, -hh));
+      // edge midpoints and quarter points (25 = toward the negative end of the edge)
+      for (const [q, k] of [[-0.25, '25'], [0, ''], [0.25, '75']]) {
+        add('t' + k, L2W(o, q * o.w, hh)); add('b' + k, L2W(o, q * o.w, -hh));
+        add('l' + k, L2W(o, -hw, q * o.h)); add('r' + k, L2W(o, hw, q * o.h));
+      }
+      if (o.type === 'cart') { add('wl', L2W(o, -o.w * 0.3, -hh - o.wheelR)); add('wr', L2W(o, o.w * 0.3, -hh - o.wheelR)); }
+      break;
+    }
+    case 'disk': case 'pulley':
+      add('c', { x: o.x, y: o.y });
+      for (let k = 0; k < 8; k++) add('r' + k, L2W(o, o.r * Math.cos(k * TAU / 8), o.r * Math.sin(k * TAU / 8)));
+      break;
+    case 'rod':
+      add('a', L2W(o, -o.len / 2, 0)); add('m', L2W(o, 0, 0)); add('b', L2W(o, o.len / 2, 0));
+      add('q1', L2W(o, -o.len / 4, 0)); add('q3', L2W(o, o.len / 4, 0));
+      break;
+    case 'pointmass': add('c', { x: o.x, y: o.y }); break;
+    case 'pin': add('c', P(o.p)); break;
+    case 'track': { const a = P(o.a), b = P(o.b); add('a', a); add('b', b); add('m', V.mul(V.add(a, b), 0.5)); break; }
+    case 'surface':
+      if (o.kind === 'arc') { add('v0', o.pts[0]); add('v1', o.pts[o.pts.length - 1]); }
+      else o.pts.forEach((p, i) => {
+        add('v' + i, p);
+        if (i < o.pts.length - 1) add('m' + i, V.mul(V.add(p, o.pts[i + 1]), 0.5));
+      });
+      break;
+  }
+  return out;
+}
+function anchorPos(o, name) { const an = anchorsOf(o).find((a) => a.name === name); return an ? an.p : null; }
+
+// Resolve a point field: anchored points follow their target; free points are fixed in the world.
+function P(pt) {
+  if (!pt) return { x: 0, y: 0 };
+  if (pt.ref) {
+    const o = byId(pt.ref);
+    const p = o && anchorPos(o, pt.a);
+    if (p) { pt.x = p.x; pt.y = p.y; return p; }   // remember last position as a fallback
+  }
+  return { x: pt.x, y: pt.y };
+}
+const free = (x, y) => ({ x, y });
+const copyPt = (p) => (p.ref ? { ref: p.ref, a: p.a, x: p.x, y: p.y } : { x: p.x, y: p.y });
+
+/* =====================================================================
+   5. LaTeX LABELS
+   MathJax turns TeX into an <svg> of glyph paths (Computer Modern look).
+   We cache one rendered <svg> per TeX string and stamp it into the scene
+   at the right position. Before MathJax loads we fall back to italic text.
+   ===================================================================== */
+const TEX = { ready: false, cache: new Map() };
+const exPx = () => scene.settings.labelPx * 0.442;   // 1ex in px for Computer Modern at labelPx
+function texEntry(tex) {
+  if (!TEX.ready) return null;
+  if (TEX.cache.has(tex)) return TEX.cache.get(tex);
+  let e = null;
+  try {
+    const node = MathJax.tex2svg(tex, { display: false });
+    const svg = node.querySelector('svg');
+    const wEx = parseFloat(svg.getAttribute('width')), hEx = parseFloat(svg.getAttribute('height'));
+    ['style', 'role', 'focusable'].forEach((a) => svg.removeAttribute(a));
+    svg.setAttribute('overflow', 'visible');
+    e = { svg, wEx, hEx };
+  } catch (err) { e = null; }
+  TEX.cache.set(tex, e);
+  return e;
+}
+function texSize(tex) {
+  if (!tex) return { w: 0, h: 0 };
+  const e = texEntry(tex);
+  if (!e) return { w: tex.length * scene.settings.labelPx * 0.5, h: scene.settings.labelPx };
+  return { w: e.wEx * exPx(), h: e.hEx * exPx() };
+}
+// Place a label centered at screen point (sx, sy).
+function texS(tex, sx, sy) {
+  if (!tex) return '';
+  const e = texEntry(tex);
+  if (!e) {
+    return `<text x="${f(sx)}" y="${f(sy)}" font-family="Times New Roman,serif" font-style="italic" font-size="${scene.settings.labelPx}" text-anchor="middle" dominant-baseline="central">${esc(tex)}</text>`;
+  }
+  const w = e.wEx * exPx(), h = e.hEx * exPx();
+  e.svg.setAttribute('x', f(sx - w / 2)); e.svg.setAttribute('y', f(sy - h / 2));
+  e.svg.setAttribute('width', f(w)); e.svg.setAttribute('height', f(h));
+  return e.svg.outerHTML;
+}
+// Place a label just beyond a point in direction dir (screen unit vector), without overlapping it.
+function texBeside(tex, sp, dir, gap) {
+  const sz = texSize(tex);
+  const d = gap + Math.abs(dir.x) * sz.w / 2 + Math.abs(dir.y) * sz.h / 2;
+  return texS(tex, sp.x + dir.x * d, sp.y + dir.y * d);
+}
+
+/* =====================================================================
+   6. SVG DRAWING PRIMITIVES (all in SCREEN pixels)
+   Line weights follow the textbook spec: 3 px bodies/ropes,
+   2 px springs/dampers, 1 px hatching/dimensions/leaders.
+   ===================================================================== */
+let EXPORT = false;              // true while building an export (no hit areas)
+const LW = { body: 3, elem: 2, thin: 1 };
+const GRAY = '#d3d3d3';
+const FILL = { gray: GRAY, white: '#fff', none: 'none' };
+const DASH = { solid: '', dashed: '9 6', dashdot: '14 5 3 5' };
+
+function pathD(pts, closed) {
+  return pts.map((p, i) => (i ? 'L' : 'M') + f(p.x) + ' ' + f(p.y)).join('') + (closed ? 'Z' : '');
+}
+// Invisible wide stroke so thin lines are easy to click in the editor.
+function hit(d) { return EXPORT ? '' : `<path d="${d}" fill="none" stroke="transparent" stroke-width="12"/>`; }
+function polyS(pts, w, opt = {}) {
+  const d = pathD(pts, opt.closed);
+  const fill = opt.fill || 'none';
+  const dash = opt.dash ? ` stroke-dasharray="${opt.dash}"` : '';
+  return `<path d="${d}" fill="${fill}" stroke="#000" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="${opt.cap || 'round'}"${dash}/>` + (fill === 'none' ? hit(d) : '');
+}
+function circS(c, r, w, fill) {
+  return `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(r)}" fill="${fill}" stroke="${w ? '#000' : 'none'}" stroke-width="${w}"/>`;
+}
+// Filled triangular arrowhead with its tip at `tip`, pointing along unit vector `dir`.
+function headS(tip, dir, size = 12) {
+  const n = V.perp(dir), back = V.sub(tip, V.mul(dir, size));
+  return `<path d="${pathD([tip, V.add(back, V.mul(n, size * 0.36)), V.add(back, V.mul(n, -size * 0.36))], true)}" fill="#000" stroke="#000" stroke-width="1" stroke-linejoin="round"/>`;
+}
+function arrowS(tail, tip, w, size = 12) {
+  const dir = V.unit(V.sub(tip, tail));
+  return polyS([tail, V.sub(tip, V.mul(dir, size * 0.7))], w, { cap: 'butt' }) + headS(tip, dir, size);
+}
+// 45-degree hatch ticks along a screen polyline, on the side given by screen normals.
+// `normalOf(i)` returns the unit normal (screen) for segment i. Spacing continues across corners.
+function hatchAlong(spts, normalOf, spacing = 11, len = 10) {
+  let d = '', carry = spacing / 2;
+  for (let i = 0; i < spts.length - 1; i++) {
+    const A = spts[i], B = spts[i + 1], L = V.dist(A, B);
+    if (L < 1e-6) continue;
+    const t = V.unit(V.sub(B, A)), n = normalOf(i);
+    const tick = V.mul(V.unit(V.sub(n, t)), len);           // 45 degrees between normal and backwards
+    let s = carry;
+    while (s < L) {
+      const p = V.add(A, V.mul(t, s)), q = V.add(p, tick);
+      d += `M${f(p.x)} ${f(p.y)}L${f(q.x)} ${f(q.y)}`;
+      s += spacing;
+    }
+    carry = s - L;
+  }
+  return d ? `<path d="${d}" stroke="#000" stroke-width="${LW.thin}" fill="none"/>` : '';
+}
+// Hatch on the right side (side=+1) or left side (side=-1) of a WORLD polyline's travel direction.
+function hatchWorld(wpts, side) {
+  const spts = wpts.map(S);
+  return hatchAlong(spts, (i) => {
+    const d = V.unit(V.sub(wpts[i + 1], wpts[i]));
+    const wn = { x: d.y * side, y: -d.x * side };            // world right-hand normal
+    return { x: wn.x, y: -wn.y };                            // flip y for the screen
+  });
+}
+// Pin: white circle, black outline, center dot.
+function pinHeadS(c, r = 6.5) { return circS(c, r, 2, '#fff') + circS(c, 1.9, 0, '#000'); }
+// Ground mount: triangle legs from the pin to a hatched base. ang = world direction pin -> base.
+function mountS(c, angDeg, len) {
+  const dir = { x: Math.cos(toRad(angDeg)), y: -Math.sin(toRad(angDeg)) };
+  const n = V.perp(dir), base = V.add(c, V.mul(dir, len));
+  const half = Math.max(10, len * 0.5);
+  const L1 = V.add(base, V.mul(n, half)), L2 = V.sub(base, V.mul(n, half));
+  const B1 = V.add(base, V.mul(n, half + 8)), B2 = V.sub(base, V.mul(n, half + 8));
+  return polyS([L1, c, L2], LW.elem) + polyS([B1, B2], LW.elem) + hatchAlong([B1, B2], () => dir, 7, 7);
+}
+
+/* ---- Springs ---- (fixed coil count, so a stretched spring visibly opens up) */
+// Zigzag between screen points A and B. Returns path data only.
+function zigzagD(A, B, coils, amp) {
+  const L = V.dist(A, B), t = V.unit(V.sub(B, A)), n = V.perp(t);
+  const lead = Math.min(14, L * 0.15), act = L - 2 * lead, m = 2 * coils;
+  const pts = [A, V.add(A, V.mul(t, lead))];
+  for (let k = 1; k < m; k++) {
+    const along = lead + act * (k / m);
+    const side = (k % 2 ? 1 : -1) * amp;
+    pts.push(V.add(V.add(A, V.mul(t, along)), V.mul(n, side)));
+  }
+  pts.push(V.add(A, V.mul(t, L - lead)), B);
+  return pts;
+}
+// Helical coil seen from the side: a prolate cycloid (loops on one side).
+//   along(th) = pitch*(th + pi/2)/(2 pi) - a*sin(th) - a,  across(th) = R*cos(th)
+function coilPts(A, B, coils, amp) {
+  const L = V.dist(A, B), t = V.unit(V.sub(B, A)), n = V.perp(t);
+  const lead = Math.min(14, L * 0.12), act = Math.max(1, L - 2 * lead);
+  const pitch = act / coils, a = amp * 0.55, R = amp * 1.15;
+  const pts = [A];
+  const th0 = -Math.PI / 2, th1 = coils * TAU - Math.PI / 2, N = coils * 28;
+  for (let i = 0; i <= N; i++) {
+    const th = th0 + (th1 - th0) * i / N;
+    const along = lead + pitch * (th + Math.PI / 2) / TAU - a * Math.sin(th) - a;
+    pts.push(V.add(V.add(A, V.mul(t, along)), V.mul(n, R * Math.cos(th))));
+  }
+  pts.push(B);
+  return pts;
+}
+function springS(A, B, o) {
+  const pts = o.style === 'coil' ? coilPts(A, B, o.coils, o.amp) : zigzagD(A, B, o.coils, o.amp);
+  let s = polyS(pts, o.style === 'coil' ? LW.body : LW.elem);
+  if (o.nonlinear) {                                  // diagonal arrow through the spring = nonlinear
+    const mid = V.mul(V.add(A, B), 0.5), t = V.unit(V.sub(B, A)), n = V.perp(t), L = V.dist(A, B);
+    const half = Math.min(L * 0.32, 40);
+    s += arrowS(V.sub(V.sub(mid, V.mul(t, half)), V.mul(n, 18)), V.add(V.add(mid, V.mul(t, half)), V.mul(n, 18)), 1.5, 10);
+  }
+  return s;
+}
+// Dashpot: open cup attached to A, piston plate + rod attached to B.
+function dashpotS(A, B, cupW = 10) {
+  const L = V.dist(A, B), t = V.unit(V.sub(B, A)), n = V.perp(t);
+  const at = (s, k = 0) => V.add(V.add(A, V.mul(t, s)), V.mul(n, k));
+  const cup0 = L * 0.3, cup1 = L * 0.68, plate = L * 0.5;
+  let s = polyS([A, at(cup0)], LW.elem);
+  s += polyS([at(cup1, cupW), at(cup0, cupW), at(cup0, -cupW), at(cup1, -cupW)], LW.elem);
+  s += polyS([at(plate, cupW * 0.7), at(plate, -cupW * 0.7)], LW.elem);
+  s += polyS([at(plate), B], LW.elem);
+  return s;
+}
+// Two parallel branches between end plates. Returns {s, branchA:[p,q], branchB:[p,q]}.
+function parallelS(A, B, off = 16) {
+  const L = V.dist(A, B), t = V.unit(V.sub(B, A)), n = V.perp(t);
+  const lead = Math.min(14, L * 0.12);
+  const pA = V.add(A, V.mul(t, lead)), pB = V.sub(B, V.mul(t, lead));
+  let s = polyS([A, pA], LW.elem) + polyS([pB, B], LW.elem);
+  s += polyS([V.add(pA, V.mul(n, off)), V.sub(pA, V.mul(n, off))], LW.elem);
+  s += polyS([V.add(pB, V.mul(n, off)), V.sub(pB, V.mul(n, off))], LW.elem);
+  return { s, up: [V.add(pA, V.mul(n, off)), V.add(pB, V.mul(n, off))], dn: [V.sub(pA, V.mul(n, off)), V.sub(pB, V.mul(n, off))], n, t };
+}
+// Square with an X (actuator symbol), centered on the segment A-B.
+function actuatorBoxS(A, B, size = 22) {
+  const L = V.dist(A, B), t = V.unit(V.sub(B, A)), n = V.perp(t), m = V.mul(V.add(A, B), 0.5), h = size / 2;
+  const c = (a, b) => V.add(V.add(m, V.mul(t, a)), V.mul(n, b));
+  let s = polyS([A, c(-h, 0)], LW.elem) + polyS([c(h, 0), B], LW.elem);
+  s += polyS([c(-h, -h), c(h, -h), c(h, h), c(-h, h)], LW.elem, { closed: true, fill: '#fff' });
+  s += polyS([c(-h, -h), c(h, h)], 1.2) + polyS([c(-h, h), c(h, -h)], 1.2);
+  return s;
+}
+function resistorS(A, B) {
+  const t = V.unit(V.sub(B, A)), n = V.perp(t), m = V.mul(V.add(A, B), 0.5);
+  const c = (a, b) => V.add(V.add(m, V.mul(t, a)), V.mul(n, b));
+  return polyS([A, c(-16, 0)], LW.elem) + polyS([c(16, 0), B], LW.elem) +
+    polyS([c(-16, -6), c(16, -6), c(16, 6), c(-16, 6)], LW.elem, { closed: true, fill: '#fff' });
+}
+
+/* =====================================================================
+   7. PER-TYPE RENDERERS  (each returns an SVG string)
+   ===================================================================== */
+// Rope path: straight tangent segments between ends and pulleys, plus arcs that wrap the pulleys.
+// via[i] = {id, s}: s=+1 means the rope goes counter-clockwise around that pulley.
+function tangent(c1, r1, c2, r2) {
+  // r1, r2 are SIGNED radii (sign = wrap direction). We need a unit normal n with
+  // tangent points p1 = c1 + r1 n, p2 = c2 + r2 n and (p2 - p1) perpendicular to n.
+  const d = V.sub(c2, c1), L = V.len(d);
+  const k = (r1 - r2) / (L || 1);
+  if (L < 1e-9 || Math.abs(k) >= 1) return { p1: c1, p2: c2 };
+  const u = V.unit(d), up = V.perp(u), h = Math.sqrt(1 - k * k);
+  for (const sg of [1, -1]) {
+    const n = V.add(V.mul(u, k), V.mul(up, h * sg));
+    const p1 = V.add(c1, V.mul(n, r1)), p2 = V.add(c2, V.mul(n, r2));
+    if (V.cross(V.sub(p2, p1), n) <= 1e-12) return { p1, p2 };   // n on the right of travel
+  }
+  return { p1: c1, p2: c2 };
+}
+function ropeGeom(o) {
+  const nodes = [{ c: P(o.a), r: 0 }];
+  for (const v of o.via) { const q = byId(v.id); if (q) nodes.push({ c: { x: q.x, y: q.y }, r: q.r * v.s, R: q.r, s: v.s }); }
+  nodes.push({ c: P(o.b), r: 0 });
+  const segs = [];
+  for (let i = 0; i < nodes.length - 1; i++) segs.push(tangent(nodes[i].c, nodes[i].r, nodes[i + 1].c, nodes[i + 1].r));
+  const pts = [segs[0].p1, segs[0].p2];
+  for (let i = 1; i < nodes.length - 1; i++) {
+    const nd = nodes[i], pin = segs[i - 1].p2, pout = segs[i].p1;
+    const a0 = Math.atan2(pin.y - nd.c.y, pin.x - nd.c.x), a1 = Math.atan2(pout.y - nd.c.y, pout.x - nd.c.x);
+    const delta = nd.s > 0 ? mod(a1 - a0, TAU) : -mod(a0 - a1, TAU);
+    const N = Math.max(2, Math.ceil(Math.abs(delta) / 0.08));
+    for (let j = 1; j <= N; j++) pts.push(V.add(nd.c, V.mul(V.dir(a0 + delta * j / N), nd.R)));
+    pts.push(segs[i].p2);
+  }
+  let length = 0;
+  for (let i = 0; i < pts.length - 1; i++) length += V.dist(pts[i], pts[i + 1]);
+  return { pts, length };
+}
+
+function bodyLabel(o) { return texS(o.label, S({ x: o.x + o.labelDx, y: o.y + o.labelDy }).x, S({ x: o.x + o.labelDx, y: o.y + o.labelDy }).y); }
+function connLabel(A, B, tex, side, extra = 0) {
+  if (!tex) return '';
+  const n = V.perp(V.unit(V.sub(B, A)));
+  const m = V.mul(V.add(A, B), 0.5);
+  return texBeside(tex, V.add(m, V.mul(n, -side * extra)), V.mul(n, -side), 12 + 0);
+}
+
+const DRAW = {
+  surface(o) {
+    if (o.pts.length < 2) return '';
+    return polyS(o.pts.map(S), LW.body) + (o.hatch ? hatchWorld(o.pts, o.side) : '');
+  },
+  block(o) {
+    const hw = o.w / 2, hh = o.h / 2;
+    const c = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => S(L2W(o, x, y)));
+    return polyS(c, LW.body, { closed: true, fill: FILL[o.fill] }) + bodyLabel(o);
+  },
+  cart(o) {
+    const hw = o.w / 2, hh = o.h / 2, rpx = o.wheelR * view.ppm;
+    const c = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => S(L2W(o, x, y)));
+    let s = polyS(c, LW.body, { closed: true, fill: FILL[o.fill] });
+    for (const sx of [-0.3, 0.3]) s += circS(S(L2W(o, o.w * sx, -hh - o.wheelR)), rpx - 1, 2.5, '#fff');
+    return s + bodyLabel(o);
+  },
+  disk(o) {
+    const c = S(o);
+    let s = circS(c, o.r * view.ppm, LW.body, FILL[o.fill] === 'none' ? 'transparent' : FILL[o.fill]);
+    if (o.showR) {
+      const tip = S(L2W(o, o.r, 0)), dir = V.unit(V.sub(tip, c));
+      s += arrowS(c, tip, LW.thin, 10);
+      s += texBeside(o.rLabel, V.mul(V.add(c, tip), 0.5), V.perp(dir), 4);
+    }
+    if (o.centerPin) s += pinHeadS(c, 5.5);
+    return s + bodyLabel(o);
+  },
+  pulley(o) {
+    const c = S(o);
+    let s = o.mount === 'ground' ? mountS(c, o.mountAngle, o.mountLen) : '';
+    s += circS(c, o.r * view.ppm, LW.body, FILL[o.fill] === 'none' ? 'transparent' : FILL[o.fill]);
+    return s + pinHeadS(c, 5.5) + bodyLabel(o);
+  },
+  rod(o) {
+    return polyS([S(L2W(o, -o.len / 2, 0)), S(L2W(o, o.len / 2, 0))], o.width) + bodyLabel(o);
+  },
+  pointmass(o) {
+    const c = S(o);
+    if (o.style === 'bob') return circS(c, o.size + 3, 0, '#000') + circS(c, (o.size + 3) * 0.33, 0, '#fff') + bodyLabel(o);
+    return circS(c, o.size, 0, '#000') + bodyLabel(o);
+  },
+  pin(o) {
+    const c = S(P(o.p));
+    return (o.mount === 'ground' ? mountS(c, o.mountAngle, o.mountLen) : '') + pinHeadS(c);
+  },
+  track(o) {
+    const A = S(P(o.a)), B = S(P(o.b)), n = V.perp(V.unit(V.sub(B, A))), h = o.width / 2;
+    const a1 = V.add(A, V.mul(n, h)), b1 = V.add(B, V.mul(n, h)), a2 = V.sub(A, V.mul(n, h)), b2 = V.sub(B, V.mul(n, h));
+    let s = polyS([a1, b1], 1.5) + polyS([a2, b2], 1.5) + polyS([a1, a2], 1.5) + polyS([b1, b2], 1.5);
+    if (o.hatch) s += hatchAlong([a1, b1], () => n, 9, 7) + hatchAlong([b2, a2], () => V.mul(n, -1), 9, 7);
+    return s;
+  },
+  spring(o) {
+    const A = S(P(o.a)), B = S(P(o.b));
+    return springS(A, B, o) + connLabel(A, B, o.label, o.labelSide, o.amp + 4);
+  },
+  damper(o) {
+    const A = S(P(o.a)), B = S(P(o.b));
+    return dashpotS(A, B) + connLabel(A, B, o.label, o.labelSide, 10);
+  },
+  springdamper(o) {
+    const A = S(P(o.a)), B = S(P(o.b));
+    const g = parallelS(A, B, 18);
+    const [ks, cs] = o.swap ? [g.dn, g.up] : [g.up, g.dn];
+    let s = g.s + springS(ks[0], ks[1], o) + dashpotS(cs[0], cs[1], 9);
+    s += connLabel(ks[0], ks[1], o.labelK, -1 * (o.swap ? -1 : 1), o.amp + 6);
+    s += connLabel(cs[0], cs[1], o.labelC, 1 * (o.swap ? -1 : 1), 12);
+    return s;
+  },
+  actuator(o) {
+    const A = S(P(o.a)), B = S(P(o.b));
+    if (!o.showRL) return actuatorBoxS(A, B) + connLabel(A, B, o.label, o.labelSide, 12);
+    // R_L branch on the "upper" side (screen -n), actuator on the other branch
+    const g = parallelS(A, B, 15);
+    let s = g.s + resistorS(g.dn[0], g.dn[1]) + actuatorBoxS(g.up[0], g.up[1], 18);
+    s += texBeside(o.labelRL, V.mul(V.add(g.dn[0], g.dn[1]), 0.5), V.mul(g.n, -1), 9);
+    s += texBeside(o.label, V.mul(V.add(g.up[0], g.up[1]), 0.5), g.n, 12);
+    return s;
+  },
+  rope(o) {
+    const g = ropeGeom(o);
+    let s = polyS(g.pts.map(S), LW.body);
+    if (o.label && g.pts.length > 1) s += connLabel(S(g.pts[0]), S(g.pts[1]), o.label, 1, 2);
+    return s;
+  },
+  force(o) {
+    const p = P(o.p), d = V.dir(toRad(o.angle));
+    const tail = o.at === 'tail' ? p : V.sub(p, V.mul(d, o.len));
+    const tip = o.at === 'tail' ? V.add(p, V.mul(d, o.len)) : p;
+    const T = S(tail), H = S(tip), sd = V.unit(V.sub(H, T));
+    return arrowS(T, H, LW.elem, 13) + texBeside(o.label, H, sd, 6);
+  },
+  moment(o) {
+    const c = S(P(o.p)), R = o.r * view.ppm, a0 = toRad(o.start), sw = toRad(o.sweep);
+    const pt = (a) => ({ x: c.x + R * Math.cos(a), y: c.y - R * Math.sin(a) });
+    const N = 30, pts = [];
+    for (let i = 0; i <= N; i++) pts.push(pt(a0 + sw * i / N * 0.92));
+    const end = pt(a0 + sw), last = pts[pts.length - 1];
+    let s = polyS(pts, LW.elem) + headS(end, V.unit(V.sub(end, last)), 12);
+    const mid = pt(a0 + sw / 2);
+    s += texBeside(o.label, mid, V.unit(V.sub(mid, c)), 6);
+    return s;
+  },
+  line(o) { return polyS([S(P(o.a)), S(P(o.b))], o.weight, { dash: DASH[o.dash] }); },
+  dim(o) {
+    const A = P(o.a), B = P(o.b);
+    let A2, B2;
+    if (o.orient === 'horizontal') { const y = A.y + o.off; A2 = { x: A.x, y }; B2 = { x: B.x, y }; }
+    else if (o.orient === 'vertical') { const x = A.x + o.off; A2 = { x, y: A.y }; B2 = { x, y: B.y }; }
+    else { const n = V.perp(V.unit(V.sub(B, A))); A2 = V.add(A, V.mul(n, o.off)); B2 = V.add(B, V.mul(n, o.off)); }
+    const sA = S(A), sB = S(B), sA2 = S(A2), sB2 = S(B2);
+    const t = V.unit(V.sub(sB2, sA2)), n = V.perp(t);
+    // extension lines (or short end ticks if there is no offset), drawn 6 px past the dimension line
+    let s = '';
+    const ext = (p, q) => {
+      if (V.dist(p, q) < 2) return polyS([V.add(q, V.mul(n, 7)), V.sub(q, V.mul(n, 7))], LW.thin);
+      const u = V.unit(V.sub(q, p));
+      return polyS([V.add(p, V.mul(u, 3)), V.add(q, V.mul(u, 6))], LW.thin);
+    };
+    s += ext(sA, sA2) + ext(sB, sB2);
+    s += polyS([sA2, sB2], LW.thin) + headS(sA2, V.mul(t, -1), 9) + headS(sB2, t, 9);
+    const value = V.dist(A2, B2);
+    const tex = o.showValue ? `${o.label} = ${value.toFixed(2)}\\,\\mathrm{m}` : o.label;
+    const out = V.unit(V.sub(sA2, sA)); const side = V.len(V.sub(sA2, sA)) > 1 ? out : V.mul(n, -1);
+    s += texBeside(tex, V.mul(V.add(sA2, sB2), 0.5), side, 5);
+    return s;
+  },
+  angle(o) {
+    const v = P(o.v), r = P(o.r), t = P(o.t);
+    const a1 = Math.atan2(r.y - v.y, r.x - v.x), a2 = Math.atan2(t.y - v.y, t.x - v.x);
+    let delta = mod(a2 - a1 + Math.PI, TAU) - Math.PI;              // shortest signed angle
+    const c = S(v), R = o.rad * view.ppm;
+    const pt = (a) => ({ x: c.x + R * Math.cos(a), y: c.y - R * Math.sin(a) });
+    let s = o.showRef ? polyS([c, S(V.add(v, V.mul(V.dir(a1), Math.max(o.rad * 1.6, V.dist(v, r)))))], LW.thin, { dash: DASH.dashdot }) : '';
+    const N = 32, trimS = o.arrows === 'both' ? 0.08 : 0, trimE = o.arrows === 'none' ? 0 : 0.08;
+    const pts = [];
+    for (let i = 0; i <= N; i++) pts.push(pt(a1 + delta * (trimS + (1 - trimS - trimE) * i / N)));
+    s += polyS(pts, 1.4);
+    if (o.arrows !== 'none') { const e = pt(a2); s += headS(e, V.unit(V.sub(e, pts[pts.length - 1])), 10); }
+    if (o.arrows === 'both') { const e = pt(a1); s += headS(e, V.unit(V.sub(e, pts[0])), 10); }
+    const mid = pt(a1 + delta / 2);
+    const tex = o.showValue ? `${o.label} = ${toDeg(Math.abs(delta)).toFixed(1)}^\\circ` : o.label;
+    s += texBeside(tex, mid, V.unit(V.sub(mid, c)), 5);
+    return s;
+  },
+  coord(o) {
+    const c = S(P(o.p)), d = { x: Math.cos(toRad(o.angle)), y: -Math.sin(toRad(o.angle)) }, n = V.perp(d);
+    const t1 = V.add(c, V.mul(n, 15)), t2 = V.sub(c, V.mul(n, 15));
+    let s = polyS([t1, t2], 1.5) + hatchAlong([t1, t2], () => V.mul(d, -1), 6, 6);
+    s += circS(c, 3.2, 0, '#000') + arrowS(c, V.add(c, V.mul(d, 24)), 2, 9);
+    s += texBeside(o.label, V.add(c, V.mul(d, 6)), V.mul(n, d.x >= 0 ? 1 : -1).y < 0 ? V.mul(n, d.x >= 0 ? 1 : -1) : V.mul(n, d.x >= 0 ? -1 : 1), 14);
+    return s;
+  },
+  axes(o) {
+    const p = P(o.p), dx = V.dir(toRad(o.angle)), dy = V.mul(V.perp(dx), o.yDir);
+    const c = S(p), X = S(V.add(p, V.mul(dx, o.lenX))), Y = S(V.add(p, V.mul(dy, o.lenY)));
+    return arrowS(c, X, LW.elem, 12) + arrowS(c, Y, LW.elem, 12) +
+      texBeside(o.labelX, X, V.unit(V.sub(X, c)), 6) + texBeside(o.labelY, Y, V.unit(V.sub(Y, c)), 6);
+  },
+  gravity(o) {
+    const c = S(P(o.p)), tip = { x: c.x, y: c.y + o.len * view.ppm };
+    return arrowS(c, tip, 1.5, 10) + texBeside(o.label, V.mul(V.add(c, tip), 0.5), { x: 1, y: 0 }, 10);
+  },
+  leader(o) {
+    const A = S(P(o.a)), B = S(P(o.b)), sz = texSize(o.label);
+    const u = V.unit(V.sub(B, A)), start = V.add(A, V.mul(u, Math.min(sz.w, sz.h) / 2 + 5));
+    return polyS([start, B], LW.thin) + texS(o.label, A.x, A.y);
+  },
+  text(o) { const c = S(P(o.p)); return texS(o.label, c.x, c.y); },
+};
+
+/* =====================================================================
+   8. RENDERING THE SCENE
+   Phase 1 rebuilds the SVG markup whenever something changes. That is
+   simple and fast enough for ~50 objects (we're only building strings).
+   ===================================================================== */
+const ui = { tool: 'select', pending: [], rope: null, mouseW: { x: 0, y: 0 }, snap: null, drag: null, sel: new Set(), handles: [], space: false };
+
+function sortedObjects() {
+  return scene.objects.map((o, i) => [o, i]).sort((a, b) => (META[a[0].type].layer - META[b[0].type].layer) || (a[1] - b[1])).map((x) => x[0]);
+}
+function sceneMarkup() {
+  let s = '';
+  for (const o of sortedObjects()) {
+    let body = '';
+    try { body = DRAW[o.type](o); } catch (err) { console.error(err, o); }
+    s += `<g data-id="${o.id}" class="obj">${body}</g>`;
+  }
+  return s;
+}
+function gridMarkup() {
+  if (!scene.settings.showGrid) return '';
+  const svg = $('svg'), w = svg.clientWidth, h = svg.clientHeight;
+  let step = scene.settings.grid;
+  while (step * view.ppm < 8) step *= 5;
+  const tl = W({ x: 0, y: 0 }), br = W({ x: w, y: h });
+  let d = '', dMajor = '';
+  for (let x = Math.floor(tl.x / step) * step; x <= br.x; x += step) {
+    const sx = f(S({ x, y: 0 }).x), major = Math.abs(x / (step * 10) - Math.round(x / (step * 10))) < 1e-6;
+    (major ? (dMajor += `M${sx} 0V${h}`) : (d += `M${sx} 0V${h}`));
+  }
+  for (let y = Math.floor(br.y / step) * step; y <= tl.y; y += step) {
+    const sy = f(S({ x: 0, y }).y), major = Math.abs(y / (step * 10) - Math.round(y / (step * 10))) < 1e-6;
+    (major ? (dMajor += `M0 ${sy}H${w}`) : (d += `M0 ${sy}H${w}`));
+  }
+  const o = S({ x: 0, y: 0 });
+  return `<path d="${d}" stroke="#f0f0f0" stroke-width="1"/><path d="${dMajor}" stroke="#e2e2e2" stroke-width="1"/>` +
+    `<path d="M${f(o.x)} 0V${h}M0 ${f(o.y)}H${w}" stroke="#d4d4d4" stroke-width="1"/>`;
+}
+function scaleBarMarkup() {
+  const h = $('svg').clientHeight;
+  const nice = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50];
+  const L = nice.find((n) => n * view.ppm >= 70) || 50, px = L * view.ppm;
+  const x0 = 16, y0 = h - 18;
+  return `<g><path d="M${x0} ${y0 - 5}V${y0}H${x0 + px}V${y0 - 5}" stroke="#555" stroke-width="1.5" fill="none"/>` +
+    `<text x="${x0 + px / 2}" y="${y0 - 8}" font-size="11" text-anchor="middle" fill="#555" font-family="system-ui">${L} m</text></g>`;
+}
+function render() {
+  $('gridG').innerHTML = gridMarkup();
+  $('sceneG').innerHTML = sceneMarkup();
+  $('overlay').innerHTML = overlayMarkup();
+}
+
+// Editor-only overlay: selection boxes, handles, snap marker, ghost preview, scale bar.
+function overlayMarkup() {
+  let s = '';
+  ui.handles = [];
+  for (const id of ui.sel) {
+    const g = $('sceneG').querySelector(`[data-id="${id}"]`);
+    if (!g) continue;
+    const bb = g.getBBox();
+    s += `<rect x="${f(bb.x - 4)}" y="${f(bb.y - 4)}" width="${f(bb.width + 8)}" height="${f(bb.height + 8)}" fill="none" stroke="var(--sel)" stroke-dasharray="4 3" stroke-width="1"/>`;
+    if (ui.sel.size === 1) for (const h of handlesOf(byId(id))) {
+      const i = ui.handles.push(h) - 1, c = S(h.pos);
+      if (h.key === 'rot') {
+        const cc = S(h.center);
+        s += `<path d="M${f(cc.x)} ${f(cc.y)}L${f(c.x)} ${f(c.y)}" stroke="var(--sel)" stroke-width="1"/>`;
+        s += `<circle class="handle" data-h="${i}" cx="${f(c.x)}" cy="${f(c.y)}" r="6" fill="#fff" stroke="var(--sel)" stroke-width="1.5"/>`;
+      } else {
+        s += `<rect class="handle" data-h="${i}" x="${f(c.x - 5)}" y="${f(c.y - 5)}" width="10" height="10" fill="#fff" stroke="var(--sel)" stroke-width="1.5"/>`;
+      }
+    }
+  }
+  const g = ghostObject();
+  if (g) { try { s += `<g opacity="0.45">${DRAW[g.type](g)}</g>`; } catch (e) { /* incomplete ghost */ } }
+  if (ui.snap && ui.tool !== 'select') {
+    const c = S(ui.snap);
+    s += ui.snap.ref ? `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="7" fill="none" stroke="var(--sel)" stroke-width="2"/>`
+      : `<path d="M${f(c.x - 5)} ${f(c.y)}h10M${f(c.x)} ${f(c.y - 5)}v10" stroke="var(--sel)" stroke-width="1"/>`;
+  }
+  return s + scaleBarMarkup();
+}
+
+// Draggable handles for the selected object: endpoints, vertices, rotation.
+function handlesOf(o) {
+  const hs = [];
+  const m = META[o.type];
+  if (m.pts) for (const k of m.pts) if (o[k]) hs.push({ id: o.id, key: k, pos: P(o[k]) });
+  if (o.type === 'force') {
+    const p = P(o.p), d = V.dir(toRad(o.angle));
+    hs.push({ id: o.id, key: 'head', pos: o.at === 'tail' ? V.add(p, V.mul(d, o.len)) : V.sub(p, V.mul(d, o.len)) });
+  }
+  if (o.type === 'rod') { hs.push({ id: o.id, key: 'rodA', pos: L2W(o, -o.len / 2, 0) }, { id: o.id, key: 'rodB', pos: L2W(o, o.len / 2, 0) }); }
+  if (o.type === 'surface' && o.kind !== 'arc') o.pts.forEach((p, i) => hs.push({ id: o.id, key: 'v' + i, pos: p }));
+  if (m.rot && o.type !== 'rod') {
+    const center = { x: o.x, y: o.y };
+    const reach = (o.h || o.r * 2 || 0.5) / 2 + 40 / view.ppm;
+    hs.push({ id: o.id, key: 'rot', center, pos: L2W(o, 0, reach) });
+  }
+  return hs;
+}
+function setHandle(o, key, pt, e) {
+  if (key === 'rot') {
+    let a = Math.atan2(pt.y - o.y, pt.x - o.x) - Math.PI / 2;
+    if (e.shiftKey) a = toRad(Math.round(toDeg(a) / 15) * 15);
+    o.angle = a; return;
+  }
+  if (key === 'head') {
+    const p = P(o.p), d = o.at === 'tail' ? V.sub(pt, p) : V.sub(p, pt);
+    o.angle = toDeg(Math.atan2(d.y, d.x)); o.len = Math.max(0.05, V.len(d)); return;
+  }
+  if (key === 'rodA' || key === 'rodB') {
+    const other = L2W(o, key === 'rodA' ? o.len / 2 : -o.len / 2, 0);
+    Object.assign(o, key === 'rodA' ? rodGeom(pt, other) : rodGeom(other, pt)); return;
+  }
+  if (o.type === 'surface') { o.pts[+key.slice(1)] = { x: pt.x, y: pt.y }; return; }
+  o[key] = copyPt(pt);
+}
+function rodGeom(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, len: Math.max(0.02, V.dist(a, b)), angle: Math.atan2(b.y - a.y, b.x - a.x) };
+}
+
+/* =====================================================================
+   9. SNAPPING
+   Priority: anchor points within 10 px  >  15-degree angle lock (Shift)  >  grid.
+   Hold Alt to turn snapping off.
+   ===================================================================== */
+function snapPoint(w, e, exclude = new Set()) {
+  const base = ui.pending.length ? ui.pending[ui.pending.length - 1] : (ui.rope ? ropeLastPoint() : null);
+  if (e && e.shiftKey && base) {                       // angle lock relative to the previous point
+    const d = V.sub(w, base), L = V.len(d);
+    const a = toRad(Math.round(toDeg(Math.atan2(d.y, d.x)) / 15) * 15);
+    let Ls = L;
+    if (scene.settings.snapGrid) Ls = Math.round(L / scene.settings.grid) * scene.settings.grid;
+    return V.add(base, V.mul(V.dir(a), Ls));
+  }
+  if (e && e.altKey) return { x: w.x, y: w.y };
+  let best = null, bestD = 10;
+  const ws = S(w);
+  for (const o of scene.objects) {
+    if (exclude.has(o.id)) continue;
+    for (const an of anchorsOf(o)) {
+      const d = V.dist(S(an.p), ws);
+      if (d < bestD) { bestD = d; best = { x: an.p.x, y: an.p.y, ref: o.id, a: an.name }; }
+    }
+  }
+  if (best) return best;
+  if (scene.settings.snapGrid) { const g = scene.settings.grid; return { x: Math.round(w.x / g) * g, y: Math.round(w.y / g) * g }; }
+  return { x: w.x, y: w.y };
+}
+function ropeLastPoint() {
+  const r = ui.rope;
+  if (!r) return null;
+  if (r.via.length) { const q = byId(r.via[r.via.length - 1].id); return { x: q.x, y: q.y }; }
+  return r.a;
+}
+
+/* =====================================================================
+   10. TOOLS
+   mode: 'one' (single click), 'two' (two clicks), 'three', 'poly' (double-click
+   or Enter to finish), 'rope' (start, click pulleys to wrap, end).
+   make(points) builds the object (without an id) from the clicked points.
+   ===================================================================== */
+const mk = (type, props) => Object.assign(DEF[type](), props, { type });
+function arcThrough(A, B, M) {
+  // Circle through 3 points; sample the arc from A to B that passes through M.
+  const ax = A.x, ay = A.y, bx = B.x, by = B.y, mx = M.x, my = M.y;
+  const d = 2 * (ax * (by - my) + bx * (my - ay) + mx * (ay - by));
+  if (Math.abs(d) < 1e-9) return [{ x: ax, y: ay }, { x: bx, y: by }];
+  const ux = ((ax * ax + ay * ay) * (by - my) + (bx * bx + by * by) * (my - ay) + (mx * mx + my * my) * (ay - by)) / d;
+  const uy = ((ax * ax + ay * ay) * (mx - bx) + (bx * bx + by * by) * (ax - mx) + (mx * mx + my * my) * (bx - ax)) / d;
+  const r = Math.hypot(ax - ux, ay - uy);
+  const aA = Math.atan2(ay - uy, ax - ux), aB = Math.atan2(by - uy, bx - ux), aM = Math.atan2(my - uy, mx - ux);
+  const ccw = mod(aB - aA, TAU), toM = mod(aM - aA, TAU);
+  const delta = toM < ccw ? ccw : ccw - TAU;
+  const N = Math.max(12, Math.ceil(Math.abs(delta) / 0.05));
+  const pts = [];
+  for (let i = 0; i <= N; i++) pts.push({ x: ux + r * Math.cos(aA + delta * i / N), y: uy + r * Math.sin(aA + delta * i / N) });
+  return pts;
+}
+const xy = (p) => ({ x: p.x, y: p.y });
+const conn = (type) => (p) => { const o = mk(type, { a: copyPt(p[0]), b: copyPt(p[1]) }); if ('restLen' in o) o.restLen = +V.dist(p[0], p[1]).toFixed(4); return o; };
+const TOOLS = {
+  select: { group: 'Edit', name: 'Select / move', key: 'v', mode: 'select', hint: 'Click to select (Shift adds). Drag to move; drag square handles to re-attach; round handle rotates (Shift = 15°).' },
+  surfline: { group: 'Fixed surfaces', name: 'Surface line', mode: 'two', make: (p) => mk('surface', { kind: 'line', pts: [xy(p[0]), xy(p[1])] }) },
+  polyline: { group: 'Fixed surfaces', name: 'Surface polyline', mode: 'poly', make: (p) => mk('surface', { kind: 'polyline', pts: p.map(xy) }) },
+  arc: { group: 'Fixed surfaces', name: 'Surface arc', mode: 'three', hint: 'Click start, end, then a point the arc passes through.', make: (p) => mk('surface', { kind: 'arc', pts: p.length === 3 ? arcThrough(p[0], p[1], p[2]) : p.map(xy) }) },
+  block: { group: 'Bodies', name: 'Block', key: 'b', mode: 'one', make: (p) => mk('block', xy(p[0])) },
+  cart: { group: 'Bodies', name: 'Cart', mode: 'one', make: (p) => mk('cart', xy(p[0])) },
+  disk: { group: 'Bodies', name: 'Disk', key: 'd', mode: 'one', make: (p) => mk('disk', xy(p[0])) },
+  rod: { group: 'Bodies', name: 'Rod', mode: 'two', make: (p) => mk('rod', rodGeom(p[0], p[1])) },
+  pointmass: { group: 'Bodies', name: 'Point mass / bob', mode: 'one', make: (p) => mk('pointmass', xy(p[0])) },
+  pulley: { group: 'Bodies', name: 'Pulley', mode: 'one', make: (p) => mk('pulley', xy(p[0])) },
+  pin: { group: 'Joints', name: 'Pin', key: 'p', mode: 'one', make: (p) => mk('pin', { p: copyPt(p[0]) }) },
+  groundpin: { group: 'Joints', name: 'Ground pin', mode: 'one', make: (p) => mk('pin', { p: copyPt(p[0]), mount: 'ground' }) },
+  track: { group: 'Joints', name: 'Slider / track', mode: 'two', make: (p) => mk('track', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
+  spring: { group: 'Elements', name: 'Spring', key: 's', mode: 'two', make: conn('spring') },
+  damper: { group: 'Elements', name: 'Damper', mode: 'two', make: conn('damper') },
+  springdamper: { group: 'Elements', name: 'Spring + damper', mode: 'two', make: conn('springdamper') },
+  actuator: { group: 'Elements', name: 'Actuator', mode: 'two', make: conn('actuator') },
+  rope: { group: 'Elements', name: 'Rope', key: 'r', mode: 'rope', hint: 'Click start; click inside pulleys/disks to wrap (the side you click is the side the rope passes); click the end point. Alt-click a pulley to attach instead. Esc cancels.' },
+  force: { group: 'Loads', name: 'Force', key: 'f', mode: 'two', hint: 'Click the point of application, then the arrow direction.', make: (p) => { const d = V.sub(p[1], p[0]); return mk('force', { p: copyPt(p[0]), angle: toDeg(Math.atan2(d.y, d.x)), len: Math.max(0.1, V.len(d)) }); } },
+  moment: { group: 'Loads', name: 'Moment', mode: 'one', make: (p) => mk('moment', { p: copyPt(p[0]) }) },
+  line: { group: 'Annotations', name: 'Line', key: 'l', mode: 'two', make: (p) => mk('line', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
+  dim: { group: 'Annotations', name: 'Dimension', mode: 'two', make: (p) => mk('dim', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
+  angle: { group: 'Annotations', name: 'Angle arc', mode: 'three', hint: 'Click the vertex, a point on the reference line, then the target point.', make: (p) => p.length < 3 ? mk('line', { a: copyPt(p[0]), b: copyPt(p[1]), dash: 'dashdot' }) : mk('angle', { v: copyPt(p[0]), r: copyPt(p[1]), t: copyPt(p[2]) }) },
+  coord: { group: 'Annotations', name: 'Coordinate marker', mode: 'one', make: (p) => mk('coord', { p: copyPt(p[0]) }) },
+  axes: { group: 'Annotations', name: 'Axes', mode: 'one', make: (p) => mk('axes', { p: copyPt(p[0]) }) },
+  gravity: { group: 'Annotations', name: 'Gravity arrow', mode: 'one', make: (p) => mk('gravity', { p: xy(p[0]) }) },
+  leader: { group: 'Annotations', name: 'Leader + label', mode: 'two', hint: 'Click where the label goes, then the part it points to.', make: (p) => mk('leader', { a: xy(p[0]), b: copyPt(p[1]) }) },
+  text: { group: 'Annotations', name: 'Label', key: 't', mode: 'one', make: (p) => mk('text', { p: copyPt(p[0]) }) },
+};
+const NEED = { one: 1, two: 2, three: 3 };
+
+function setTool(t) {
+  ui.tool = t; ui.pending = []; ui.rope = null;
+  document.querySelectorAll('#tools button').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
+  const T = TOOLS[t];
+  $('stHint').textContent = T.hint || (T.mode === 'one' ? 'Click to place.' : T.mode === 'two' ? 'Click two points (Shift = 15° steps; type length, angle in the top bar).' : T.mode === 'poly' ? 'Click points; double-click or Enter to finish.' : '');
+  updateExactBox();
+  render();
+}
+function updateExactBox() {
+  const T = TOOLS[ui.tool];
+  $('exactBox').style.display = (T.mode === 'two' || T.mode === 'poly') && ui.pending.length ? 'inline' : 'none';
+}
+// Ghost preview of the object being created, following the mouse.
+function ghostObject() {
+  const T = TOOLS[ui.tool];
+  if (!ui.snap || T.mode === 'select') return null;
+  if (T.mode === 'rope') {
+    if (!ui.rope) return null;
+    return { ...mk('rope', { a: ui.rope.a, b: ui.snap, via: ui.rope.via }) };
+  }
+  const pts = [...ui.pending, ui.snap];
+  if (T.mode === 'poly') return pts.length >= 2 ? T.make(pts) : null;
+  if (T.mode === 'three' && pts.length === 2 && ui.tool === 'arc') return mk('surface', { pts: pts.map(xy) });
+  if (pts.length < Math.min(NEED[T.mode], 2) && T.mode !== 'one') return null;
+  return T.make(pts);
+}
+function addObject(o) {
+  o.id = uid();
+  if (o.type === 'block' || o.type === 'cart' || o.type === 'pointmass') o.label = autoLabel();
+  scene.objects.push(o);
+  ui.sel = new Set([o.id]);
+  commit(); render(); showPanel();
+  return o;
+}
+function autoLabel() {
+  const n = scene.objects.filter((o) => ['block', 'cart', 'pointmass'].includes(o.type)).length + 1;
+  return 'm_' + n;
+}
+function toolClick(e, w) {
+  const T = TOOLS[ui.tool];
+  const p = snapPoint(w, e);
+  if (T.mode === 'rope') return ropeClick(e, p, w);
+  ui.pending.push(p);
+  if (T.mode !== 'poly' && ui.pending.length >= NEED[T.mode]) {
+    const o = T.make(ui.pending);
+    ui.pending = [];
+    addObject(o);
+  }
+  updateExactBox(); render();
+}
+function finishPoly() {
+  // remove duplicate points created by the double-click
+  const pts = ui.pending.filter((p, i, a) => i === 0 || V.dist(p, a[i - 1]) > 1e-9);
+  ui.pending = [];
+  if (pts.length >= 2) addObject(TOOLS.polyline.make(pts));
+  updateExactBox(); render();
+}
+function ropeClick(e, p, w) {
+  if (!ui.rope) { ui.rope = { a: copyPt(p), via: [] }; render(); return; }
+  const g = e.target.closest && e.target.closest('[data-id]');
+  const q = g && byId(g.dataset.id);
+  if (q && (q.type === 'pulley' || q.type === 'disk') && !e.altKey && !ui.rope.via.some((v) => v.id === q.id)) {
+    // Which side of the pulley did you click? Left of the line (previous point -> center)
+    // means the rope passes on the left, so it goes around clockwise (s = -1).
+    const prev = ropeLastPoint(), C = { x: q.x, y: q.y };
+    const s = V.cross(V.sub(C, prev), V.sub(w, prev)) > 0 ? -1 : 1;
+    ui.rope.via.push({ id: q.id, s });
+    render(); return;
+  }
+  const o = mk('rope', { a: ui.rope.a, b: copyPt(p), via: ui.rope.via });
+  ui.rope = null;
+  addObject(o);
+}
+function exactEntry() {
+  const m = $('exact').value.split(',').map((s) => parseFloat(s));
+  if (!ui.pending.length || !isFinite(m[0])) return;
+  const ang = isFinite(m[1]) ? m[1] : 0;
+  const base = ui.pending[ui.pending.length - 1];
+  const p = V.add(base, V.mul(V.dir(toRad(ang)), m[0]));
+  $('exact').value = '';
+  ui.pending.push(p);
+  const T = TOOLS[ui.tool];
+  if (T.mode !== 'poly' && ui.pending.length >= NEED[T.mode]) { const o = T.make(ui.pending); ui.pending = []; addObject(o); }
+  updateExactBox(); render();
+}
+
+/* =====================================================================
+   11. MOUSE / KEYBOARD
+   ===================================================================== */
+function screenPt(e) { const r = $('svg').getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+
+// Move an object by world displacement d. Anchored points stay attached to their targets.
+function translate(o, d) {
+  if (META[o.type].body) { o.x += d.x; o.y += d.y; }
+  if (o.type === 'surface') o.pts = o.pts.map((p) => V.add(p, d));
+  for (const k of META[o.type].pts || []) {
+    const p = o[k];
+    if (p && !p.ref) { p.x += d.x; p.y += d.y; }
+  }
+}
+
+function initPointer() {
+  const svg = $('svg');
+  svg.addEventListener('contextmenu', (e) => e.preventDefault());
+  svg.addEventListener('pointerdown', (e) => {
+    const s = screenPt(e), w = W(s);
+    if (e.button === 1 || e.button === 2 || ui.space) {
+      ui.drag = { kind: 'pan', s0: s, ox: view.ox, oy: view.oy };
+      svg.setPointerCapture(e.pointerId); return;
+    }
+    if (e.button !== 0) return;
+    if (ui.tool === 'select') {
+      const hEl = e.target.closest('[data-h]');
+      if (hEl) { ui.drag = { kind: 'handle', h: ui.handles[+hEl.dataset.h], moved: false }; svg.setPointerCapture(e.pointerId); return; }
+      const g = e.target.closest('[data-id]');
+      if (g) {
+        const id = g.dataset.id;
+        if (e.shiftKey) { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); }
+        else if (!ui.sel.has(id)) ui.sel = new Set([id]);
+        ui.drag = { kind: 'move', last: snapGridOnly(w), moved: false };
+        svg.setPointerCapture(e.pointerId);
+      } else ui.sel.clear();
+      render(); showPanel(); return;
+    }
+    toolClick(e, w);
+  });
+  svg.addEventListener('pointermove', (e) => {
+    const s = screenPt(e), w = W(s);
+    ui.mouseW = w;
+    $('stPos').textContent = `x = ${w.x.toFixed(2)} m, y = ${w.y.toFixed(2)} m`;
+    const d = ui.drag;
+    if (d && d.kind === 'pan') { view.ox = d.ox + s.x - d.s0.x; view.oy = d.oy + s.y - d.s0.y; render(); return; }
+    if (d && d.kind === 'move') {
+      const now = snapGridOnly(w), delta = V.sub(now, d.last);
+      if (delta.x || delta.y) { for (const id of ui.sel) translate(byId(id), delta); d.last = now; d.moved = true; render(); }
+      return;
+    }
+    if (d && d.kind === 'handle') {
+      const o = byId(d.h.id);
+      const p = d.h.key === 'rot' ? w : snapPoint(w, e, new Set([o.id]));
+      setHandle(o, d.h.key, p, e); d.moved = true; render(); return;
+    }
+    ui.snap = ui.tool === 'select' ? null : snapPoint(w, e);
+    if (ui.tool !== 'select') render();
+  });
+  svg.addEventListener('pointerup', () => {
+    const d = ui.drag; ui.drag = null;
+    if (d && d.moved) { commit(); showPanel(); }
+  });
+  svg.addEventListener('dblclick', () => { if (TOOLS[ui.tool].mode === 'poly') finishPoly(); });
+  svg.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const s = screenPt(e), w = W(s);
+    view.zoom = Math.min(20, Math.max(0.1, view.zoom * Math.pow(1.0015, -e.deltaY)));
+    view.ox = s.x - w.x * view.ppm; view.oy = s.y + w.y * view.ppm;   // keep the point under the cursor fixed
+    render();
+  }, { passive: false });
+}
+function snapGridOnly(w) {
+  if (!scene.settings.snapGrid) return w;
+  const g = scene.settings.grid; return { x: Math.round(w.x / g) * g, y: Math.round(w.y / g) * g };
+}
+
+function initKeys() {
+  window.addEventListener('keydown', (e) => {
+    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+    if (e.target === $('exact') && e.key === 'Enter') { exactEntry(); return; }
+    if (typing) return;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+    if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+    if (ctrl && e.key.toLowerCase() === 'c') { copySel(); return; }
+    if (ctrl && e.key.toLowerCase() === 'v') { paste(); return; }
+    if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); copySel(); paste(); return; }
+    if (e.key === 'Delete' || e.key === 'Backspace') { deleteSel(); return; }
+    if (e.key === 'Escape') { if (ui.pending.length || ui.rope) { ui.pending = []; ui.rope = null; updateExactBox(); render(); } else setTool('select'); return; }
+    if (e.key === 'Enter' && TOOLS[ui.tool].mode === 'poly') { finishPoly(); return; }
+    if (e.key === ' ') { ui.space = true; e.preventDefault(); return; }
+    if (e.key.toLowerCase() === 'f' && !ctrl && ui.tool === 'select' && !e.shiftKey) { fitView(); return; }
+    if (e.key === 'r' && ui.tool === 'select' && ui.sel.size) {     // R rotates the selection 15 degrees
+      for (const id of ui.sel) { const o = byId(id); if (META[o.type].rot) o.angle += toRad(e.shiftKey ? -15 : 15); }
+      commit(); render(); showPanel(); return;
+    }
+    if (ctrl || e.altKey) return;
+    for (const [t, T] of Object.entries(TOOLS)) if (T.key === e.key.toLowerCase() && !(ui.tool === 'select' && ['f', 'r'].includes(T.key))) { setTool(t); return; }
+  });
+  window.addEventListener('keyup', (e) => { if (e.key === ' ') ui.space = false; });
+}
+
+function fitView() {
+  render();
+  const g = $('sceneG');
+  if (!scene.objects.length) return;
+  const bb = g.getBBox(), svg = $('svg');
+  const k = Math.min((svg.clientWidth - 80) / bb.width, (svg.clientHeight - 80) / bb.height);
+  const w0 = W({ x: bb.x, y: bb.y + bb.height });
+  view.zoom = Math.min(10, Math.max(0.1, view.zoom * k));
+  const scaledW = bb.width * k, scaledH = bb.height * k;
+  const left = (svg.clientWidth - scaledW) / 2, bottom = (svg.clientHeight + scaledH) / 2;
+  view.ox = left - w0.x * view.ppm; view.oy = bottom + w0.y * view.ppm;
+  render();
+}
+
+/* =====================================================================
+   12. PROPERTIES PANEL
+   Each type lists its fields; the panel is generated from these lists.
+   ===================================================================== */
+const Fd = {
+  num: (k, l, step = 0.01, min = null, max = null) => ({ t: 'num', k, l, step, min, max }),
+  deg: (k, l) => ({ t: 'deg', k, l }),
+  degv: (k, l) => ({ t: 'num', k, l, step: 1 }),          // value already stored in degrees
+  bool: (k, l) => ({ t: 'bool', k, l }),
+  sel: (k, l, o) => ({ t: 'sel', k, l, o }),
+  tex: (k, l) => ({ t: 'tex', k, l }),
+  expr: (k, l, vars) => ({ t: 'expr', k, l, vars }),
+  head: (l) => ({ t: 'head', l }),
+  info: (l, fn) => ({ t: 'info', l, fn }),
+  btn: (l, fn) => ({ t: 'btn', l, fn }),
+};
+const PHYS_FIELDS = [Fd.head('Physics (used from Phase 2)'), Fd.num('mass', 'Mass m (kg)', 0.1, 0), Fd.bool('fixed', 'Fixed (immovable)'),
+  Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1)];
+const LABEL_FIELDS = [Fd.head('Label'), Fd.tex('label', 'Label (TeX)'), Fd.num('labelDx', 'Label offset x (m)', 0.05), Fd.num('labelDy', 'Label offset y (m)', 0.05)];
+const POS = [Fd.num('x', 'x (m)', 0.05), Fd.num('y', 'y (m)', 0.05)];
+const curLen = (o) => V.dist(P(o.a), P(o.b));
+const restBtn = Fd.btn('Set rest length to current length', (o) => { o.restLen = +curLen(o).toFixed(4); });
+const SPRING_LOOK = [Fd.sel('style', 'Style', ['zigzag', 'coil']), Fd.num('coils', 'Coil count', 1, 2, 40), Fd.num('amp', 'Coil width (px)', 1, 2, 30), Fd.bool('nonlinear', 'Nonlinear F = -(k₂Δ + k₃Δ³)')];
+const FIELDS = {
+  surface: [Fd.info('Kind', (o) => o.kind), Fd.bool('hatch', 'Hatching'), Fd.sel('side', 'Hatch side', [[1, 'right of drawing direction'], [-1, 'left of drawing direction']]),
+    Fd.head('Physics'), Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1)],
+  block: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  cart: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.num('wheelR', 'Wheel radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.bool('rolling', 'Real rolling wheels (Phase 4)'), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  disk: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop', 'sphere']), Fd.bool('centerPin', 'Center pin'), Fd.bool('showR', 'Radius arrow'), Fd.tex('rLabel', 'Radius label'), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  pulley: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.sel('fill', 'Fill', ['white', 'gray', 'none']), Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  rod: [...POS, Fd.num('len', 'Length (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.num('width', 'Line weight (px)', 0.5, 0.5), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  pointmass: [...POS, Fd.sel('style', 'Style', [['mass', 'point mass (filled)'], ['bob', 'pendulum bob']]), Fd.num('size', 'Dot radius (px)', 1, 2), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  pin: [Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0)],
+  track: [Fd.num('width', 'Slot width (px)', 1, 2), Fd.bool('hatch', 'Hatching')],
+  spring: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
+    Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
+  damper: [Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
+  springdamper: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
+    Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.bool('swap', 'Swap branches'), Fd.tex('labelK', 'Spring label'), Fd.tex('labelC', 'Damper label')],
+  actuator: [Fd.expr('law', 'Force law F(t, d, v) (N)', ['t', 'd', 'v']), Fd.bool('showRL', 'Show R_L in parallel'), Fd.num('K', 'Motor constant K', 0.1), Fd.num('RL', 'R_L (Ω)', 0.1, 0.001),
+    Fd.info('Equivalent damping K²/R_L', (o) => (o.K * o.K / o.RL).toFixed(3) + ' N·s/m'), Fd.tex('label', 'Label'), Fd.tex('labelRL', 'R_L label')],
+  rope: [Fd.info('Length along path', (o) => ropeGeom(o).length.toFixed(3) + ' m'), Fd.info('Wraps', (o) => o.via.length + ' pulley(s)'), Fd.btn('Reverse wrap directions', (o) => o.via.forEach((v) => { v.s = -v.s; })), Fd.tex('label', 'Label')],
+  force: [Fd.expr('law', 'Magnitude F(t) (N)', ['t']), Fd.degv('angle', 'Direction (°)'), Fd.sel('frame', 'Direction is fixed in', ['world', 'body']), Fd.sel('at', 'Point is the arrow’s', ['tail', 'tip']), Fd.num('len', 'Drawn length (m)', 0.05, 0.05), Fd.tex('label', 'Label')],
+  moment: [Fd.expr('law', 'M(t) (N·m, + = CCW)', ['t']), Fd.num('r', 'Arc radius (m)', 0.01, 0.02), Fd.degv('start', 'Start angle (°)'), Fd.degv('sweep', 'Sweep (°, sign = direction)'), Fd.tex('label', 'Label')],
+  line: [Fd.sel('dash', 'Style', ['solid', 'dashed', 'dashdot']), Fd.num('weight', 'Weight (px)', 0.5, 0.5)],
+  dim: [Fd.sel('orient', 'Orientation', ['aligned', 'horizontal', 'vertical']), Fd.num('off', 'Offset (m)', 0.05), Fd.tex('label', 'Label'), Fd.bool('showValue', 'Show current value')],
+  angle: [Fd.num('rad', 'Arc radius (m)', 0.05, 0.05), Fd.sel('arrows', 'Arrowheads', ['end', 'both', 'none']), Fd.bool('showRef', 'Dash-dot reference line'), Fd.tex('label', 'Label'), Fd.bool('showValue', 'Show current value')],
+  coord: [Fd.degv('angle', 'Direction (°)'), Fd.tex('label', 'Label')],
+  axes: [Fd.degv('angle', 'Rotation (°)'), Fd.num('lenX', 'X arrow length (m)', 0.05, 0.05), Fd.num('lenY', 'Y arrow length (m)', 0.05, 0.05), Fd.sel('yDir', 'Second axis', [[1, '90° CCW of first'], [-1, '90° CW of first']]), Fd.tex('labelX', 'First label'), Fd.tex('labelY', 'Second label')],
+  gravity: [Fd.num('len', 'Arrow length (m)', 0.05, 0.05), Fd.tex('label', 'Label')],
+  leader: [Fd.tex('label', 'Label')],
+  text: [Fd.tex('label', 'Label')],
+};
+const QUICK = ['\\theta', '\\varphi', '\\omega', '\\alpha', '\\mu', '\\ell', '\\Delta', '\\vec{e}_1', '_{}', '^{}', '\\dot{x}', '\\neq'];
+let lastTexInput = null;
+
+function showPanel() {
+  const box = $('props');
+  if (ui.sel.size !== 1) { box.innerHTML = ui.sel.size > 1 ? `<h3>${ui.sel.size} objects selected</h3><p class="note">Drag to move them together. Ctrl+C / Ctrl+V to copy.</p>` + settingsHTML() : settingsHTML(); bindSettings(); return; }
+  const o = byId([...ui.sel][0]);
+  let h = `<h3>${META[o.type].name} <span class="note">${o.id}</span></h3>`;
+  const fields = FIELDS[o.type] || [];
+  fields.forEach((fd, i) => {
+    if (fd.t === 'head') { h += `<h5>${fd.l}</h5>`; return; }
+    if (fd.t === 'info') { h += `<div class="row"><label>${fd.l}</label><span>${esc(fd.fn(o))}</span></div>`; return; }
+    if (fd.t === 'btn') { h += `<div class="row"><button data-i="${i}">${fd.l}</button></div>`; return; }
+    let input = '';
+    const v = o[fd.k];
+    if (fd.t === 'num') input = `<input type="number" data-i="${i}" step="${fd.step}" value="${+(+v).toFixed(4)}">`;
+    if (fd.t === 'deg') input = `<input type="number" data-i="${i}" step="1" value="${+toDeg(v).toFixed(2)}">`;
+    if (fd.t === 'bool') input = `<input type="checkbox" data-i="${i}" ${v ? 'checked' : ''}>`;
+    if (fd.t === 'sel') input = `<select data-i="${i}">${fd.o.map((op) => { const [val, txt] = Array.isArray(op) ? op : [op, op]; return `<option value="${val}" ${String(val) === String(v) ? 'selected' : ''}>${txt}</option>`; }).join('')}</select>`;
+    if (fd.t === 'tex' || fd.t === 'expr') input = `<input type="text" data-i="${i}" value="${esc(v)}">`;
+    h += `<div class="row"><label>${fd.l}</label>${input}</div>`;
+    if (fd.t === 'tex') h += `<div class="texprev" data-prev="${i}"></div>`;
+    if (fd.t === 'expr') h += `<div class="err" data-err="${i}"></div>`;
+  });
+  if (fields.some((fd) => fd.t === 'tex')) h += `<div class="quick">${QUICK.map((q) => `<button data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div><p class="note">Quick-insert goes into the last label box you clicked.</p>`;
+  if (META[o.type].pts) h += `<p class="note">Square handles: drag onto an anchor to attach (blue circle), or anywhere to fix to the ground.</p>`;
+  box.innerHTML = h;
+  box.querySelectorAll('[data-prev]').forEach((el) => updateTexPreview(el, o[fields[+el.dataset.prev].k]));
+  box.querySelectorAll('[data-err]').forEach((el) => checkExpr(el, fields[+el.dataset.err], o));
+  box.querySelectorAll('[data-i]').forEach((el) => {
+    const fd = fields[+el.dataset.i];
+    if (fd.t === 'btn') { el.onclick = () => { fd.fn(o); commit(); render(); showPanel(); }; return; }
+    if (fd.t === 'tex') el.addEventListener('focus', () => { lastTexInput = el; });
+    el.addEventListener('input', () => { applyField(o, fd, el); render(); });
+    el.addEventListener('change', () => { applyField(o, fd, el); commit(); render(); showPanel(); });
+  });
+  box.querySelectorAll('[data-q]').forEach((b) => b.onclick = () => {
+    const el = lastTexInput; if (!el) return;
+    const q = b.dataset.q, s0 = el.selectionStart ?? el.value.length;
+    el.value = el.value.slice(0, s0) + q + el.value.slice(el.selectionEnd ?? s0);
+    el.focus(); el.selectionStart = el.selectionEnd = s0 + q.length - (q.endsWith('{}') ? 1 : 0);
+    el.dispatchEvent(new Event('change'));
+  });
+}
+function applyField(o, fd, el) {
+  let v;
+  if (fd.t === 'num') { v = parseFloat(el.value); if (!isFinite(v)) return; if (fd.min != null) v = Math.max(fd.min, v); if (fd.max != null) v = Math.min(fd.max, v); }
+  else if (fd.t === 'deg') { v = parseFloat(el.value); if (!isFinite(v)) return; v = toRad(v); }
+  else if (fd.t === 'bool') v = el.checked;
+  else if (fd.t === 'sel') { v = el.value; if (/^-?\d+$/.test(v)) v = +v; }
+  else v = el.value;
+  // Friction rule: mu_k can never exceed mu_s.
+  if (fd.k === 'mu_k' && v > o.mu_s) { v = o.mu_s; msg('μ_k was capped at μ_s (μ_k ≤ μ_s).'); }
+  if (fd.k === 'mu_s' && v < o.mu_k) { o.mu_k = v; msg('μ_k lowered to match μ_s (μ_k ≤ μ_s).'); }
+  o[fd.k] = v;
+  if (fd.t === 'tex') { const p = el.parentElement.nextElementSibling; if (p) updateTexPreview(p, v); }
+  if (fd.t === 'expr') { const p = el.parentElement.nextElementSibling; if (p) checkExpr(p, fd, o); }
+}
+function updateTexPreview(el, tex) {
+  if (!TEX.ready || !tex) { el.textContent = tex || ''; return; }
+  const e = texEntry(tex);
+  el.innerHTML = e ? e.svg.outerHTML : '<span class="err">TeX error</span>';
+  const s = el.querySelector('svg');
+  if (s && e) { s.setAttribute('x', 0); s.setAttribute('y', 0); s.setAttribute('width', e.wEx * 9 + 'px'); s.setAttribute('height', e.hEx * 9 + 'px'); }
+}
+function checkExpr(el, fd, o) {
+  try { const fn = Expr.compile(String(o[fd.k]), fd.vars); const v = fn({ t: 1, d: 0, v: 0 }); el.textContent = '✓ ok (at t = 1 s: ' + (+v.toFixed(4)) + ')'; el.style.color = '#070'; }
+  catch (err) { el.textContent = '✗ ' + err.message; el.style.color = '#b00'; }
+}
+function settingsHTML() {
+  const st = scene.settings;
+  return `<h3>Scene settings</h3>
+  <div class="row"><label>Scale (px per m)</label><input type="number" id="sPx" value="${st.pxPerM}" step="10" min="5"></div>
+  <div class="row"><label>Grid spacing (m)</label><input type="number" id="sGrid" value="${st.grid}" step="0.05" min="0.005"></div>
+  <div class="row"><label>Show grid</label><input type="checkbox" id="sShow" ${st.showGrid ? 'checked' : ''}></div>
+  <div class="row"><label>Snap to grid</label><input type="checkbox" id="sSnap" ${st.snapGrid ? 'checked' : ''}></div>
+  <div class="row"><label>Label size (px)</label><input type="number" id="sLbl" value="${st.labelPx}" step="1" min="8"></div>
+  <h5>Shortcuts</h5>
+  <p class="note">V select · B block · D disk · S spring · R rope · F force · P pin · L line · T label<br>
+  Shift: 15° angle steps / rotate in 15° steps · Alt: no snapping · Esc: cancel / back to Select<br>
+  Wheel: zoom · Right/middle drag or Space+drag: pan · F: fit view (Select tool)<br>
+  Ctrl+Z / Ctrl+Y undo/redo · Ctrl+C / Ctrl+V / Ctrl+D copy/paste/duplicate · Del delete · R rotate selection 15°</p>`;
+}
+function bindSettings() {
+  const st = scene.settings;
+  const bind = (id, fn) => { const el = $(id); if (el) el.onchange = () => { fn(el); TEX.cache.clear(); commit(); render(); }; };
+  bind('sPx', (el) => { const v = parseFloat(el.value); if (v > 0) st.pxPerM = v; });
+  bind('sGrid', (el) => { const v = parseFloat(el.value); if (v > 0) st.grid = v; });
+  bind('sShow', (el) => { st.showGrid = el.checked; });
+  bind('sSnap', (el) => { st.snapGrid = el.checked; });
+  bind('sLbl', (el) => { const v = parseFloat(el.value); if (v > 4) st.labelPx = v; });
+}
+let msgTimer = null;
+function msg(t) { $('stMsg').textContent = t; clearTimeout(msgTimer); msgTimer = setTimeout(() => { $('stMsg').textContent = ''; }, 4000); }
+
+/* =====================================================================
+   13. UNDO / REDO, CLIPBOARD, DELETE
+   Undo keeps a list of JSON snapshots of the whole scene (simple and robust).
+   ===================================================================== */
+const hist = { stack: [], i: -1 };
+function commit() {
+  const s = JSON.stringify(scene);
+  if (hist.stack[hist.i] === s) return;
+  hist.stack.splice(hist.i + 1);
+  hist.stack.push(s);
+  if (hist.stack.length > 200) hist.stack.shift();
+  hist.i = hist.stack.length - 1;
+  try { localStorage.setItem('mechSandbox.autosave', s); } catch (e) { /* storage blocked: fine */ }
+}
+function restore(s) { scene = JSON.parse(s); ui.sel = new Set([...ui.sel].filter((id) => byId(id))); render(); showPanel(); }
+function undo() { if (hist.i > 0) restore(hist.stack[--hist.i]); }
+function redo() { if (hist.i < hist.stack.length - 1) restore(hist.stack[++hist.i]); }
+
+let clipboard = null;
+function copySel() { if (ui.sel.size) { clipboard = JSON.stringify(scene.objects.filter((o) => ui.sel.has(o.id))); msg(ui.sel.size + ' object(s) copied'); } }
+function paste() {
+  if (!clipboard) return;
+  const objs = JSON.parse(clipboard), map = {};
+  for (const o of objs) { map[o.id] = uid(); }
+  const d = { x: 0.2, y: -0.2 };
+  for (const o of objs) {
+    o.id = map[o.id];
+    // references to objects that were copied too now point at the copies
+    for (const k of META[o.type].pts || []) { const p = o[k]; if (p && p.ref && map[p.ref]) p.ref = map[p.ref]; else if (p && p.ref) { /* keep attached to original */ } }
+    if (o.via) o.via.forEach((v) => { if (map[v.id]) v.id = map[v.id]; });
+    translate(o, d);
+    scene.objects.push(o);
+  }
+  ui.sel = new Set(objs.map((o) => o.id));
+  commit(); render(); showPanel();
+}
+function deleteSel() {
+  if (!ui.sel.size) return;
+  for (const o of scene.objects) {          // anything attached to a deleted object stays where it is
+    for (const k of META[o.type].pts || []) { const p = o[k]; if (p && p.ref && ui.sel.has(p.ref)) { const q = P(p); o[k] = { x: q.x, y: q.y }; } }
+    if (o.via) o.via = o.via.filter((v) => !ui.sel.has(v.id));
+  }
+  scene.objects = scene.objects.filter((o) => !ui.sel.has(o.id));
+  ui.sel.clear(); commit(); render(); showPanel();
+}
+
+/* =====================================================================
+   14. SAVE / LOAD / EXPORT
+   ===================================================================== */
+function download(name, data, type) {
+  const url = URL.createObjectURL(data instanceof Blob ? data : new Blob([data], { type }));
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function exportSVGString() {
+  // Export at zoom 1 (the scene's px-per-meter) so labels and line weights
+  // keep the same proportions no matter how far you are zoomed in.
+  const saved = { zoom: view.zoom, ox: view.ox, oy: view.oy };
+  view.zoom = 1;
+  render();
+  const bb = $('sceneG').getBBox(), m = 20;
+  EXPORT = true;
+  const content = sceneMarkup().replace(/ class="obj"/g, '').replace(/ data-id="[^"]*"/g, '');
+  EXPORT = false;
+  Object.assign(view, saved);
+  render();
+  const x = f(bb.x - m), y = f(bb.y - m), w = f(bb.width + 2 * m), h = f(bb.height + 2 * m);
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${w}" height="${h}" viewBox="${x} ${y} ${w} ${h}">` +
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="#fff"/>${content}</svg>`;
+}
+function exportPNG() {
+  const str = exportSVGString();
+  const wm = /width="([\d.]+)"/.exec(str), hm = /height="([\d.]+)"/.exec(str);
+  const scale = 3;                                  // 3x for crisp notes
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas'); c.width = Math.ceil(+wm[1] * scale); c.height = Math.ceil(+hm[1] * scale);
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob((b) => download('diagram.png', b), 'image/png');
+  };
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(str);
+}
+function loadSceneObject(obj) {
+  if (!obj || !Array.isArray(obj.objects)) { msg('Not a sandbox scene file.'); return; }
+  scene = Object.assign(newScene(), obj, { settings: Object.assign(newScene().settings, obj.settings) });
+  for (const o of scene.objects) { const d = DEF[o.type] && DEF[o.type](); if (d) for (const k in d) if (!(k in o)) o[k] = d[k]; }
+  ui.sel.clear(); TEX.cache.clear(); commit(); fitView(); showPanel();
+}
+
+/* =====================================================================
+   15. EXAMPLE SCENES (the four reference diagrams, drawn with the editor's own objects)
+   ===================================================================== */
+const EX = {};
+function exBuilder(fn) {
+  return () => {
+    scene = newScene();
+    const add = (type, props) => { const o = mk(type, props); o.id = uid(); scene.objects.push(o); return o; };
+    const R = (o, a) => ({ ref: o.id, a, x: 0, y: 0 });
+    fn(add, R);
+    ui.sel.clear(); commit(); fitView(); showPanel();
+  };
+}
+EX.ex1 = exBuilder((add, R) => {
+  add('surface', { kind: 'polyline', pts: [{ x: 5.3, y: 1.9 }, { x: 0.15, y: 1.9 }, { x: 0.15, y: 0.15 }, { x: 5.3, y: 0.15 }], side: 1 });
+  const m1 = add('block', { x: 2.35, y: 0.95, w: 3.0, h: 1.05, label: 'm_1' });
+  add('spring', { a: R(m1, 'r'), b: free(5.3, 0.95), style: 'coil', coils: 4, amp: 13, label: '' });
+  const p1 = add('pulley', { x: 1.6, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
+  const p2 = add('pulley', { x: 3.4, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
+  add('pin', { p: free(1.0, 4.05), mount: 'ground', mountAngle: 180, mountLen: 30 });
+  add('axes', { p: free(1.0, 4.05), lenX: 0.85, lenY: 0.85, labelX: '{}_{\\mathrm{I}}\\vec{e}_1', labelY: '{}_{\\mathrm{I}}\\vec{e}_2' });
+  add('rod', rodGeom({ x: 1.0, y: 4.05 }, { x: 1.4, y: 2.45 }));
+  const big = add('disk', { x: 4.1, y: 4.3, r: 0.9, showR: true, angle: toRad(-28), label: 'm', labelDx: 1.0, labelDy: 0.9 });
+  add('spring', { a: R(big, 'c'), b: free(4.1, 6.3), style: 'coil', coils: 4, amp: 13, label: '' });
+  const C = add('pointmass', { x: 3.62, y: 3.0, size: 7, label: '', mass: 0.01 });
+  add('rope', { a: R(p1, 'r1'), b: R(C, 'c'), via: [{ id: big.id, s: -1 }] });
+  add('rope', { a: R(C, 'c'), b: R(p2, 'r1') });
+  add('rope', { a: R(p2, 'r0'), b: free(5.4, 3.55) });
+  add('leader', { a: free(3.05, 3.55), b: R(C, 'c'), label: 'C' });
+  add('dim', { a: free(0.15, 0.15), b: R(m1, 'br'), orient: 'horizontal', off: -0.45, label: 'x' });
+});
+EX.ex2 = exBuilder((add, R) => {
+  add('surface', { kind: 'polyline', pts: [{ x: 0, y: 3.0 }, { x: 0, y: 0 }, { x: 4.3, y: 0 }], side: 1 });
+  const cart = add('cart', { x: 2.1, y: 0.715, w: 1.9, h: 0.95, wheelR: 0.12, label: 'm_1', labelDx: -0.8, labelDy: 0.33 });
+  add('actuator', { a: free(0, 1.19), b: R(cart, 'tl'), showRL: true, label: '' });
+  add('spring', { a: free(0, 0.715), b: R(cart, 'l'), coils: 9, amp: 6, label: 'k_1', labelSide: 1, restLen: 1.15 });
+  add('damper', { a: free(0, 0.4775), b: R(cart, 'l25'), label: 'C_1', labelSide: -1 });
+  add('line', { a: free(2.1, 1.6), b: free(2.1, -0.95), dash: 'dashed' });
+  add('line', { a: free(1.75, 0.715), b: free(2.45, 0.715), dash: 'dashed' });
+  add('text', { p: free(2.25, 0.88), label: 'O' });
+  const rod = add('rod', { ...rodGeom({ x: 2.1, y: 0.715 }, { x: 2.1 + 1.4 * Math.cos(toRad(-70)), y: 0.715 + 1.4 * Math.sin(toRad(-70)) }), width: 1.5 });
+  const end = L2W(rod, rod.len / 2, 0);
+  const m2 = add('pointmass', { x: end.x + 1.05 * Math.cos(toRad(-70)), y: end.y + 1.05 * Math.sin(toRad(-70)), size: 11, label: 'm_2', labelDx: -0.4, labelDy: 0 });
+  add('springdamper', { a: R(rod, 'b'), b: R(m2, 'c'), nonlinear: true, labelK: 'k_2, k_3', labelC: 'C_2', swap: true, restLen: 1.05 });
+  add('force', { p: R(m2, 'c'), angle: -70, len: 0.55, label: 'F_2(t)' });
+  add('force', { p: R(cart, 'r'), angle: 0, len: 0.8, label: 'F_1(t)' });
+  add('moment', { p: R(cart, 'c'), r: 0.25, start: 210, sweep: -120, label: 'M(t)' });
+  add('angle', { v: R(cart, 'c'), r: free(2.1, -0.5), t: R(rod, 'b'), rad: 0.95, arrows: 'both', showRef: false, label: '\\theta(t)' });
+  add('dim', { a: free(0, 2.0), b: free(1.2, 2.0), orient: 'horizontal', off: 0.3, label: '\\ell_1' });
+  add('dim', { a: free(1.2, 2.0), b: R(cart, 'c'), orient: 'horizontal', off: 0.3, label: 'X(t)' });
+  add('dim', { a: R(cart, 'c'), b: R(rod, 'b'), off: 1.0, label: '\\ell_2' });
+  add('dim', { a: R(rod, 'b'), b: R(m2, 'c'), off: 1.0, label: 'Z(t)' });
+  add('axes', { p: free(0, 0), lenX: 4.75, lenY: 0.6, yDir: -1, labelX: 'X', labelY: 'Y' });
+});
+EX.ex3 = exBuilder((add, R) => {
+  add('surface', { kind: 'line', pts: [{ x: -0.3, y: 5.0 }, { x: 4.9, y: 5.0 }], side: -1 });
+  const blk = add('block', { x: 2.6, y: 1.15, w: 3.1, h: 1.15, fill: 'white', label: '3m', labelDy: -0.1 });
+  const disk = add('disk', { x: 2.25, y: 2.225, r: 0.5, fill: 'white', showR: true, angle: toRad(40), label: '' });
+  add('line', { a: free(1.25, 1.725), b: free(1.25, 2.225), weight: 3 });
+  add('line', { a: free(3.95, 1.725), b: free(3.95, 2.225), weight: 3 });
+  const pl = add('pin', { p: free(1.25, 2.225) });
+  const pr = add('pin', { p: free(3.95, 2.225) });
+  add('spring', { a: R(pl, 'c'), b: R(disk, 'c'), coils: 7, label: 'k', restLen: 1.0 });
+  add('damper', { a: R(disk, 'c'), b: R(pr, 'c'), label: 'd' });
+  const top = add('pin', { p: free(3.55, 4.75), mount: 'ground', mountAngle: 90, mountLen: 24 });
+  const bob = add('pointmass', { x: 4.45, y: 3.35, style: 'bob', size: 11, label: '' });
+  add('rod', { ...rodGeom({ x: 3.55, y: 4.75 }, { x: 4.45, y: 3.35 }), width: 6 });
+  add('spring', { a: R(bob, 'c'), b: R(pr, 'c'), coils: 5, label: '2k', labelSide: -1, restLen: 1.2 });
+  add('angle', { v: R(top, 'c'), r: free(3.55, 3.4), t: R(bob, 'c'), rad: 0.85, arrows: 'end', showRef: true, label: '\\varphi' });
+  add('dim', { a: R(top, 'c'), b: R(bob, 'c'), off: -0.45, label: '\\ell' });
+  add('coord', { p: free(0.85, 3.1), angle: 0, label: 'x_1' });
+  add('coord', { p: free(2.25, 3.75), angle: 180, label: 'x_2' });
+  add('spring', { a: free(-0.3, 1.43), b: R(blk, 'l75'), coils: 5, label: 'k' });
+  add('spring', { a: R(blk, 'r75'), b: free(5.5, 1.43), coils: 5, label: 'k' });
+  add('damper', { a: free(-0.3, 0.86), b: R(blk, 'l25'), label: 'd', labelSide: -1 });
+  add('leader', { a: free(1.75, 1.45), b: free(2.1, 1.74), label: '\\mu \\neq 0' });
+});
+EX.ex4 = exBuilder((add, R) => {
+  add('surface', { kind: 'polyline', pts: [{ x: 0, y: 4.6 }, { x: 0, y: 0 }, { x: 1.4, y: 0 }, { x: 1.4, y: 4.6 }], side: 1 });
+  const blk = add('block', { x: 0.7, y: 2.45, w: 1.25, h: 1.25, label: 'm_c' });
+  add('spring', { a: free(0.7, 0), b: R(blk, 'b'), style: 'coil', coils: 7, amp: 14, label: 'k_v', labelSide: 1, restLen: 1.6 });
+  const link = add('rod', rodGeom({ x: 0.7, y: 3.075 }, { x: 0.8, y: 4.95 }));
+  add('pin', { p: R(blk, 't') });
+  const beam = add('rod', { ...rodGeom({ x: 0.8, y: 4.95 }, { x: 4.6, y: 5.4 }), width: 5, label: 'm_b', labelDx: -1.0, labelDy: 0.3 });
+  add('pin', { p: R(link, 'b') });
+  add('pin', { p: free(3.2, 4.95 + 0.45 * (2.4 / 3.8)), mount: 'ground', mountAngle: 90, mountLen: 22 });
+  add('dim', { a: R(link, 'b'), b: R(blk, 't'), orient: 'vertical', off: -0.35, label: 'L_l' });
+  add('dim', { a: free(1.85, 0), b: R(blk, 'b'), orient: 'vertical', off: 0, label: 'y_c' });
+  add('gravity', { p: free(2.4, 4.1), label: 'g' });
+  add('disk', { x: 4.7, y: 2.6, r: 0.9, label: '', centerPin: false });
+});
+
+/* =====================================================================
+   16. STARTUP
+   ===================================================================== */
+function buildToolbar() {
+  let h = '', group = '';
+  for (const [t, T] of Object.entries(TOOLS)) {
+    if (T.group !== group) { group = T.group; h += `<h4>${group}</h4>`; }
+    h += `<button data-tool="${t}" title="${T.key ? 'Shortcut: ' + T.key.toUpperCase() : ''}">${T.name}</button>`;
+  }
+  $('tools').innerHTML = h;
+  $('tools').querySelectorAll('button').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
+}
+function init() {
+  buildToolbar();
+  initPointer(); initKeys();
+  $('bNew').onclick = () => { scene = newScene(); ui.sel.clear(); commit(); render(); showPanel(); };
+  $('bOpen').onclick = () => $('fileIn').click();
+  $('fileIn').onchange = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    file.text().then((t) => { try { loadSceneObject(JSON.parse(t)); } catch (err) { msg('Could not read file: ' + err.message); } });
+    e.target.value = '';
+  };
+  $('bSave').onclick = () => download('scene.json', JSON.stringify(scene, null, 1), 'application/json');
+  $('examples').onchange = (e) => { const k = e.target.value; if (EX[k]) EX[k](); e.target.value = ''; };
+  $('bUndo').onclick = undo; $('bRedo').onclick = redo; $('bDel').onclick = deleteSel; $('bFit').onclick = fitView;
+  $('bSvg').onclick = () => download('diagram.svg', exportSVGString(), 'image/svg+xml');
+  $('bPng').onclick = exportPNG;
+  window.addEventListener('resize', render);
+  view.oy = $('svg').clientHeight - 60;
+  let saved = null;
+  try { saved = localStorage.getItem('mechSandbox.autosave'); } catch (e) { saved = null; }
+  if (saved) { try { scene = JSON.parse(saved); } catch (e) { scene = newScene(); } }
+  commit();
+  setTool('select');
+  showPanel();
+  if (saved) fitView();
+}
+window.onMathReady = () => { TEX.ready = true; TEX.cache.clear(); render(); showPanel(); };
+init();
+if (window.MathJax && MathJax.tex2svg) window.onMathReady();
+</script>
+</body>
+</html>
