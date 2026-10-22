@@ -11,12 +11,12 @@ An interactive 2D mechanics sandbox for AP Physics C: Mechanics. You draw system
 | Phase | What | State |
 |---|---|---|
 | 1 | Editor and textbook look | Done (git tag `phase-1`) |
-| 2 | Core physics | **In progress.** The file on `main` does not run yet; see [docs/PHASE2-NOTES.md](docs/PHASE2-NOTES.md) |
+| 2 | Core physics | Done (git tag `phase-2`). All 7 built-in tests pass (**Run tests** button) |
 | 3 | AP analysis tools (FBD, graphs, readouts) | Not started |
 | 4 | Advanced elements (moving pulleys, actuators, drag, orbits) | Not started |
 | 5 | Presets | Not started |
 
-To get the working Phase 1 editor while Phase 2 is in progress:
+To get an older phase's file:
 
 ```bash
 git show phase-1:mechanics-sandbox.html > mechanics-sandbox-phase1.html
@@ -26,4 +26,4 @@ git show phase-1:mechanics-sandbox.html > mechanics-sandbox-phase1.html
 
 - `mechanics-sandbox.html`: the app, split into labeled sections (see the comment at the top of the file)
 - `docs/SPEC.md`: the original requirements and answers to clarifying questions
-- `docs/PHASE2-NOTES.md`: Phase 2 design notes and what's left to do
+- `docs/PHASE2-NOTES.md`: Phase 2 design notes (Planck internals, rope constraint math, test setups)

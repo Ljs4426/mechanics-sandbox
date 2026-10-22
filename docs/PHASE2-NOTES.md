@@ -1,8 +1,16 @@
-# Phase 2 (core physics): notes and remaining work
+# Phase 2 (core physics): design notes
 
-`mechanics-sandbox.html` on `main` is **partway through Phase 2 and does not run yet**. It references `run` and `inertiaOf`, which aren't written yet, so the page throws on its first render. The working Phase 1 editor is at git tag `phase-1`.
+Phase 2 is **complete** (git tag `phase-2`). All 7 built-in tests pass. These notes record the design: the two lists below were the plan going in, and "Changes made while finishing" covers what turned out differently.
 
-## Already in the file
+## Changes made while finishing
+
+- **Collision skin.** Box2D wraps polygons and edges in a skin of 2 × `linearSlop` (1 cm by default) and lets resting contacts sink `linearSlop` (5 mm). That made a block drawn flush on the floor hop 1.5 cm at t = 0 (a 30% energy error in test 7) and made a rolling disk roll on an effective radius 2.5 mm too small (test 5 read 3.2425 instead of 3.27). Fix: `linearSlop = 1 mm`, polygons are built `SKIN` smaller than drawn, and each surface is shifted `SKIN − SLOP` into its hatched side, so drawn shapes rest exactly on drawn lines.
+- **F(t) timing.** Time-varying laws are evaluated at the middle of each substep (exact for linear F(t); evaluating at the start biased F = 2t by h·t).
+- **Label rendering.** Each MathJax label is stored once as a `<symbol>` in `<defs id="texDefs">` and drawn with `<use>` in the live view (exports still inline the full SVG). Re-parsing every label's glyphs on every frame cost about 14 ms per frame with 63 objects; the change brought script-side rendering to about 3 ms.
+- **Grid** is only rebuilt when the view or grid settings change.
+- Ref 2's pendulum rod and m₂ have `collide: false`, because the original drawing hangs them below the floor line.
+
+## Planned contents (all done)
 
 - Planck.js pinned to **1.5.0** (`<script src="https://cdn.jsdelivr.net/npm/planck@1.5.0/dist/planck.min.js">`). 1.5.1 was published 2026-10-12, which is too new to pin.
 - New scene settings: `g` (9.81), `dt` (1/240), `restThreshold` (0.05 m/s), `velIters` (30), `posIters` (10).
@@ -20,7 +28,7 @@
 - Panel field groups: `PHYS_FIELDS`, `PULLEY_PHYS`, `CONTACT_FIELDS`, `INIT_FIELDS`, `fmtI`, and the new `Fd.text` type.
 - Top-bar HTML for Play / Step / Reset / speed / time / Run tests, plus the test window HTML and CSS (`#testBox`, `#testRows`, `#testSummary`, `#bTestRun`, `#bTestClose`).
 
-## Still to write
+## Planned work (all done)
 
 1. **Settings panel physics inputs.** In `settingsHTML` / `bindSettings`, add inputs for g, Δt (1/120, 1/240, 1/480, 1/960), bounce threshold, and velocity/position iterations.
 2. **Section 16: building a Planck world from the scene.**

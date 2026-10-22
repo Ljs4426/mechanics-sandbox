@@ -142,6 +142,7 @@
   <div id="tools"></div>
   <div id="wrap">
     <svg id="svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+      <defs id="texDefs"></defs>
       <g id="gridG"></g>
       <g id="sceneG"></g>
       <g id="overlay"></g>
@@ -441,8 +442,12 @@ const copyPt = (p) => (p.ref ? { ref: p.ref, a: p.a, x: p.x, y: p.y, ...(p.a ===
    We cache one rendered <svg> per TeX string and stamp it into the scene
    at the right position. Before MathJax loads we fall back to italic text.
    ===================================================================== */
-const TEX = { ready: false, cache: new Map() };
+// In the live view each label is stored once as a <symbol> in <defs id="texDefs"> and placed with a
+// small <use> element, so redrawing 60 times a second doesn't re-parse every label's glyphs.
+// Exports still inline the full <svg> so the file is self-contained.
+const TEX = { ready: false, cache: new Map(), nextSym: 1 };
 const exPx = () => scene.settings.labelPx * 0.442;   // 1ex in px for Computer Modern at labelPx
+function texReset() { TEX.cache.clear(); const d = $('texDefs'); if (d) d.innerHTML = ''; }
 function texEntry(tex) {
   if (!TEX.ready) return null;
   if (TEX.cache.has(tex)) return TEX.cache.get(tex);
@@ -453,7 +458,9 @@ function texEntry(tex) {
     const wEx = parseFloat(svg.getAttribute('width')), hEx = parseFloat(svg.getAttribute('height'));
     ['style', 'role', 'focusable'].forEach((a) => svg.removeAttribute(a));
     svg.setAttribute('overflow', 'visible');
-    e = { svg, wEx, hEx };
+    const sym = 'tx' + (TEX.nextSym++);
+    $('texDefs').insertAdjacentHTML('beforeend', `<symbol id="${sym}" viewBox="${svg.getAttribute('viewBox')}" overflow="visible">${svg.innerHTML}</symbol>`);
+    e = { svg, wEx, hEx, sym };
   } catch (err) { e = null; }
   TEX.cache.set(tex, e);
   return e;
@@ -472,6 +479,7 @@ function texS(tex, sx, sy) {
     return `<text x="${f(sx)}" y="${f(sy)}" font-family="Times New Roman,serif" font-style="italic" font-size="${scene.settings.labelPx}" text-anchor="middle" dominant-baseline="central">${esc(tex)}</text>`;
   }
   const w = e.wEx * exPx(), h = e.hEx * exPx();
+  if (!EXPORT) return `<use href="#${e.sym}" x="${f(sx - w / 2)}" y="${f(sy - h / 2)}" width="${f(w)}" height="${f(h)}"/>`;
   e.svg.setAttribute('x', f(sx - w / 2)); e.svg.setAttribute('y', f(sy - h / 2));
   e.svg.setAttribute('width', f(w)); e.svg.setAttribute('height', f(h));
   return e.svg.outerHTML;
@@ -882,7 +890,7 @@ function sceneMarkup() {
 }
 function gridMarkup() {
   if (!scene.settings.showGrid) return '';
-  const svg = $('svg'), w = svg.clientWidth, h = svg.clientHeight;
+  const w = view.w, h = view.h;
   let step = scene.settings.grid;
   while (step * view.ppm < 8) step *= 5;
   const tl = W({ x: 0, y: 0 }), br = W({ x: w, y: h });
@@ -900,15 +908,21 @@ function gridMarkup() {
     `<path d="M${f(o.x)} 0V${h}M0 ${f(o.y)}H${w}" stroke="#d4d4d4" stroke-width="1"/>`;
 }
 function scaleBarMarkup() {
-  const h = $('svg').clientHeight;
+  const h = view.h;
   const nice = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50];
   const L = nice.find((n) => n * view.ppm >= 70) || 50, px = L * view.ppm;
   const x0 = 16, y0 = h - 18;
   return `<g><path d="M${x0} ${y0 - 5}V${y0}H${x0 + px}V${y0 - 5}" stroke="#555" stroke-width="1.5" fill="none"/>` +
     `<text x="${x0 + px / 2}" y="${y0 - 8}" font-size="11" text-anchor="middle" fill="#555" font-family="system-ui">${L} m</text></g>`;
 }
+let gridKey = '';
 function render() {
-  $('gridG').innerHTML = gridMarkup();
+  // Read the canvas size BEFORE changing the DOM (reading it afterwards forces an extra layout pass).
+  const svg = $('svg');
+  view.w = svg.clientWidth; view.h = svg.clientHeight;
+  // The grid only changes when the view or grid settings change (not while a simulation runs).
+  const gk = [view.ox, view.oy, view.ppm, view.w, view.h, scene.settings.showGrid, scene.settings.grid].join();
+  if (gk !== gridKey) { gridKey = gk; $('gridG').innerHTML = gridMarkup(); }
   $('sceneG').innerHTML = sceneMarkup();
   $('overlay').innerHTML = overlayMarkup();
 }
@@ -1472,6 +1486,13 @@ function settingsHTML() {
   <div class="row"><label>Show grid</label><input type="checkbox" id="sShow" ${st.showGrid ? 'checked' : ''}></div>
   <div class="row"><label>Snap to grid</label><input type="checkbox" id="sSnap" ${st.snapGrid ? 'checked' : ''}></div>
   <div class="row"><label>Label size (px)</label><input type="number" id="sLbl" value="${st.labelPx}" step="1" min="8"></div>
+  <h5>Physics</h5>
+  <div class="row"><label>Gravity g (m/s²)</label><input type="number" id="sG" value="${st.g}" step="0.01"></div>
+  <div class="row"><label>Time step Δt</label><select id="sDt">${[120, 240, 480, 960].map((n) => `<option value="${n}" ${Math.abs(st.dt * n - 1) < 1e-9 ? 'selected' : ''}>1/${n} s</option>`).join('')}</select></div>
+  <div class="row"><label>Bounce threshold (m/s)</label><input type="number" id="sRest" value="${st.restThreshold}" step="0.01" min="0"></div>
+  <div class="row"><label>Velocity iterations</label><input type="number" id="sVel" value="${st.velIters}" step="1" min="1"></div>
+  <div class="row"><label>Position iterations</label><input type="number" id="sPos" value="${st.posIters}" step="1" min="1"></div>
+  <p class="note">g points down (−y); 0 turns gravity off. Impacts slower than the bounce threshold don't bounce. More iterations = stiffer joints and ropes.</p>
   <h5>Shortcuts</h5>
   <p class="note">V select · B block · D disk · S spring · R rope · F force · P pin · L line · T label<br>
   Shift: 15° angle steps / rotate in 15° steps · Alt: no snapping · Esc: cancel / back to Select<br>
@@ -1480,12 +1501,17 @@ function settingsHTML() {
 }
 function bindSettings() {
   const st = scene.settings;
-  const bind = (id, fn) => { const el = $(id); if (el) el.onchange = () => { fn(el); TEX.cache.clear(); commit(); render(); }; };
+  const bind = (id, fn) => { const el = $(id); if (el) el.onchange = () => { fn(el); texReset(); commit(); render(); }; };
   bind('sPx', (el) => { const v = parseFloat(el.value); if (v > 0) st.pxPerM = v; });
   bind('sGrid', (el) => { const v = parseFloat(el.value); if (v > 0) st.grid = v; });
   bind('sShow', (el) => { st.showGrid = el.checked; });
   bind('sSnap', (el) => { st.snapGrid = el.checked; });
   bind('sLbl', (el) => { const v = parseFloat(el.value); if (v > 4) st.labelPx = v; });
+  bind('sG', (el) => { const v = parseFloat(el.value); if (isFinite(v)) st.g = v; });
+  bind('sDt', (el) => { st.dt = 1 / +el.value; });
+  bind('sRest', (el) => { const v = parseFloat(el.value); if (v >= 0) st.restThreshold = v; });
+  bind('sVel', (el) => { const v = Math.round(parseFloat(el.value)); if (v >= 1) st.velIters = Math.min(500, v); });
+  bind('sPos', (el) => { const v = Math.round(parseFloat(el.value)); if (v >= 1) st.posIters = Math.min(500, v); });
 }
 let msgTimer = null;
 function msg(t) { $('stMsg').textContent = t; clearTimeout(msgTimer); msgTimer = setTimeout(() => { $('stMsg').textContent = ''; }, 4000); }
@@ -1574,9 +1600,16 @@ function exportPNG() {
 }
 function loadSceneObject(obj) {
   if (!obj || !Array.isArray(obj.objects)) { msg('Not a sandbox scene file.'); return; }
-  scene = Object.assign(newScene(), obj, { settings: Object.assign(newScene().settings, obj.settings) });
-  for (const o of scene.objects) { const d = DEF[o.type] && DEF[o.type](); if (d) for (const k in d) if (!(k in o)) o[k] = d[k]; }
-  ui.sel.clear(); TEX.cache.clear(); commit(); fitView(); showPanel();
+  endSim();
+  scene = fillDefaults(Object.assign(newScene(), obj));
+  ui.sel.clear(); texReset(); commit(); fitView(); showPanel();
+}
+// Older saves (and autosaves) may be missing settings or fields added later: fill them with defaults.
+function fillDefaults(sc) {
+  sc.settings = Object.assign(newScene().settings, sc.settings);
+  sc.objects = sc.objects.filter((o) => DEF[o.type]);
+  for (const o of sc.objects) { const d = DEF[o.type](); for (const k in d) if (!(k in o)) o[k] = d[k]; }
+  return sc;
 }
 
 /* =====================================================================
@@ -1585,6 +1618,7 @@ function loadSceneObject(obj) {
 const EX = {};
 function exBuilder(fn) {
   return () => {
+    endSim();
     scene = newScene();
     const add = (type, props) => { const o = mk(type, props); o.id = uid(); scene.objects.push(o); return o; };
     const R = (o, a) => ({ ref: o.id, a, x: 0, y: 0 });
@@ -1619,9 +1653,11 @@ EX.ex2 = exBuilder((add, R) => {
   add('line', { a: free(2.1, 1.6), b: free(2.1, -0.95), dash: 'dashed' });
   add('line', { a: free(1.75, 0.715), b: free(2.45, 0.715), dash: 'dashed' });
   add('text', { p: free(2.25, 0.88), label: 'O' });
-  const rod = add('rod', { ...rodGeom({ x: 2.1, y: 0.715 }, { x: 2.1 + 1.4 * Math.cos(toRad(-70)), y: 0.715 + 1.4 * Math.sin(toRad(-70)) }), width: 1.5 });
+  // The pendulum hangs below the floor line in the original drawing, so it doesn't collide.
+  const rod = add('rod', { ...rodGeom({ x: 2.1, y: 0.715 }, { x: 2.1 + 1.4 * Math.cos(toRad(-70)), y: 0.715 + 1.4 * Math.sin(toRad(-70)) }), width: 1.5, collide: false });
+  add('pin', { p: R(cart, 'c'), show: false });       // hidden pin at O: the rod swings about the cart's center
   const end = L2W(rod, rod.len / 2, 0);
-  const m2 = add('pointmass', { x: end.x + 1.05 * Math.cos(toRad(-70)), y: end.y + 1.05 * Math.sin(toRad(-70)), size: 11, label: 'm_2', labelDx: -0.4, labelDy: 0 });
+  const m2 = add('pointmass', { x: end.x + 1.05 * Math.cos(toRad(-70)), y: end.y + 1.05 * Math.sin(toRad(-70)), size: 11, label: 'm_2', labelDx: -0.4, labelDy: 0, collide: false });
   add('springdamper', { a: R(rod, 'b'), b: R(m2, 'c'), nonlinear: true, labelK: 'k_2, k_3', labelC: 'C_2', swap: true, restLen: 1.05 });
   add('force', { p: R(m2, 'c'), angle: -70, len: 0.55, label: 'F_2(t)' });
   add('force', { p: R(cart, 'r'), angle: 0, len: 0.8, label: 'F_1(t)' });
@@ -1646,6 +1682,7 @@ EX.ex3 = exBuilder((add, R) => {
   const top = add('pin', { p: free(3.55, 4.75), mount: 'ground', mountAngle: 90, mountLen: 24 });
   const bob = add('pointmass', { x: 4.45, y: 3.35, style: 'bob', size: 11, label: '' });
   add('rod', { ...rodGeom({ x: 3.55, y: 4.75 }, { x: 4.45, y: 3.35 }), width: 6 });
+  add('weld', { p: R(bob, 'c') });                     // the bob is fixed to the end of the rod (not drawn)
   add('spring', { a: R(bob, 'c'), b: R(pr, 'c'), coils: 5, label: '2k', labelSide: -1, restLen: 1.2 });
   add('angle', { v: R(top, 'c'), r: free(3.55, 3.4), t: R(bob, 'c'), rad: 0.85, arrows: 'end', showRef: true, label: '\\varphi' });
   add('dim', { a: R(top, 'c'), b: R(bob, 'c'), off: -0.45, label: '\\ell' });
@@ -1672,7 +1709,888 @@ EX.ex4 = exBuilder((add, R) => {
 });
 
 /* =====================================================================
-   16. STARTUP
+   16. PHYSICS: BUILDING A PLANCK WORLD FROM THE SCENE
+   The editor's scene (a list of dicts) is turned into Planck objects once,
+   when you press Play. Each step, Planck moves the bodies and sync() copies
+   the new positions back into the scene so the normal renderer draws them.
+
+   What Planck (Box2D) does for us:  rigid bodies, gravity, contacts with
+     friction and restitution, and rigid joints (pins, welds, rods, tracks).
+   What we do ourselves:  springs, dampers, actuators, applied forces and
+     moments (explicit forces, recomputed every substep), the static/kinetic
+     friction switch, and ropes over pulleys (Section 17).
+   ===================================================================== */
+const SLIP_SPEED = 1e-3;        // m/s: contact sliding faster than this uses mu_k, slower uses mu_s
+const OMEGA_DT_TARGET = 0.01;   // substep until omega*dt <= this (accuracy target for stiff springs)
+const MAX_SUBSTEPS = 400;
+const MASS_FLOOR = 1e-3;        // kg: a movable body can't have zero mass in Box2D
+const PIN_TOL = 0.02;           // m: how close a pin must be to a body to grab it
+const NO_UD = { mu_s: 1, mu_k: 1, e: 0, stick: false, id: '?' };
+// Box2D lets touching shapes overlap by linearSlop (default 5 mm) and wraps polygons and edges in a
+// "skin" of 2 x linearSlop (1 cm). At textbook sizes that's visible in the numbers: a disk rolls on an
+// effective radius 2.5 mm too small, and a block drawn flush on the floor hops 1.5 cm at t = 0.
+// So: use a 1 mm slop, shrink polygons by their skin, and shift surfaces into their solid side.
+const SLOP = 0.001;
+if (window.planck) planck.Settings.linearSlop = SLOP;
+const SKIN = 2 * SLOP;
+// Shift a surface polyline by d toward its hatched (solid) side. Corners are mitered.
+function offsetPolyline(pts, side, d) {
+  const nrm = [];
+  for (let i = 0; i < pts.length - 1; i++) { const u = V.unit(V.sub(pts[i + 1], pts[i])); nrm.push({ x: u.y * side, y: -u.x * side }); }
+  return pts.map((p, i) => {
+    const a = nrm[Math.max(0, i - 1)], b = nrm[Math.min(nrm.length - 1, i)];
+    const m = V.unit(V.add(a, b)), c = Math.max(0.2, V.dot(m, b));
+    return V.add(p, V.mul(m, d / c));
+  });
+}
+
+// Moment of inertia about the body's center (kg m^2), from its shape, unless overridden.
+function inertiaOf(o) {
+  const ov = parseFloat(o.Iover);
+  if (ov > 0) return ov;
+  const m = +o.mass || 0;
+  switch (o.type) {
+    case 'block': case 'cart': return m * (o.w * o.w + o.h * o.h) / 12;         // rectangle
+    case 'disk': case 'pulley':
+      if (o.shape === 'hoop') return m * o.r * o.r;                              // thin ring
+      if (o.shape === 'sphere') return 0.4 * m * o.r * o.r;                      // 2/5 m r^2
+      return 0.5 * m * o.r * o.r;                                                // solid disk
+    case 'rod': return m * o.len * o.len / 12;                                   // thin rod about its middle
+    case 'pointmass': return 4e-5 * m;                                           // tiny but nonzero
+  }
+  return NaN;
+}
+// World point -> body-local coordinates (the inverse of L2W).
+function W2L(o, p) {
+  const c = Math.cos(o.angle || 0), s = Math.sin(o.angle || 0), dx = p.x - o.x, dy = p.y - o.y;
+  return { x: c * dx + s * dy, y: -s * dx + c * dy };
+}
+const rodHalfThick = (o) => Math.max(0.005, o.width / 2 / scene.settings.pxPerM);
+const pmRadius = (o) => (o.style === 'bob' ? o.size + 3 : o.size) / scene.settings.pxPerM;
+const isMasslessRod = (o) => o.type === 'rod' && !(o.mass > 0) && !o.fixed;
+// Is world point p on (or within tol of) body object o?
+function containsPoint(o, p, tol = PIN_TOL) {
+  const q = W2L(o, p);
+  switch (o.type) {
+    case 'block': return Math.abs(q.x) <= o.w / 2 + tol && Math.abs(q.y) <= o.h / 2 + tol;
+    case 'cart': return Math.abs(q.x) <= o.w / 2 + tol && q.y <= o.h / 2 + tol && q.y >= -o.h / 2 - 2 * o.wheelR - tol;
+    case 'disk': case 'pulley': return Math.hypot(q.x, q.y) <= o.r + tol;
+    case 'rod': return Math.abs(q.x) <= o.len / 2 + tol && Math.abs(q.y) <= rodHalfThick(o) + tol;
+    case 'pointmass': return Math.hypot(q.x, q.y) <= pmRadius(o) + tol;
+  }
+  return false;
+}
+// If a point field is anchored to a body (directly, or through a pin/weld), which body?
+function refBodyId(pt) {
+  for (let hops = 0; pt && pt.ref && hops < 5; hops++) {
+    const o = byId(pt.ref);
+    if (!o) return null;
+    if (META[o.type].body) return o.id;
+    pt = o.p;                                              // a pin or weld: follow its own point
+  }
+  return null;
+}
+const v2 = (p) => new planck.Vec2(p.x, p.y);
+
+class Sim {
+  constructor() {
+    if (!window.planck) throw new Error('Planck.js did not load (it needs internet the first time).');
+    const st = scene.settings;
+    this.dt = st.dt; this.t = 0; this.tMid = 0; this.steps = 0;
+    this.velIters = st.velIters; this.posIters = st.posIters;
+    this.warnings = [];
+    // Box2D only bounces impacts faster than velocityThreshold (default 1 m/s). Lower it.
+    planck.Settings.velocityThreshold = Math.max(1e-4, +st.restThreshold || 0);
+    this.world = new planck.World({ gravity: new planck.Vec2(0, -st.g), allowSleep: false });
+    this.ground = this.world.createBody();     // static body that holds every fixed surface
+    this.recs = new Map();                     // scene id -> {o, body, m, I, ...}
+    this.elements = [];                        // springs, dampers, actuators
+    this.loads = [];                           // applied forces F(t) and moments M(t)
+    this.torsions = [];                        // torsion springs at pins
+    this.ropes = [];                           // RopeSegment joints
+    this.rodLinks = [];                        // massless rods (for redrawing)
+    this.stickQueue = []; this.stuck = new Set();
+    this.buildSurfaces();
+    this.buildBodies();
+    this.glueFreePoints();
+    this.buildJoints();
+    this.buildElements();
+    this.buildLoads();
+    this.buildRopes();
+    this.chooseSubsteps();
+    this.listenContacts();
+    this.Ug0 = this.energy().Ug;
+  }
+  warn(t) { if (!this.warnings.includes(t)) this.warnings.push(t); }
+
+  /* ---- Fixed surfaces: edges (2 points) or chains (polylines, arcs) on the ground body ---- */
+  buildSurfaces() {
+    for (const o of scene.objects) {
+      if (o.type !== 'surface') continue;
+      let pts = o.pts.filter((p, i, a) => i === 0 || V.dist(p, a[i - 1]) > 0.01);
+      if (pts.length < 2) continue;
+      // Resting contact sits at (skin - slop) from the edge line, so move the line that far into the solid.
+      pts = offsetPolyline(pts, o.side || 1, SKIN - SLOP);
+      const shape = pts.length === 2 ? new planck.Edge(v2(pts[0]), v2(pts[1])) : new planck.Chain(pts.map(v2), false);
+      this.ground.createFixture(shape, { friction: o.mu_s, restitution: o.e, userData: { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: false, id: 'ground' } });
+    }
+  }
+
+  /* ---- Bodies ---- */
+  buildBodies() {
+    for (const o of scene.objects) {
+      if (!META[o.type].body || isMasslessRod(o)) continue;
+      // Pulleys: mass 0 = ideal (rope slides over it). A fixed ideal pulley is just part of the ground.
+      // A massive pulley with a fixed axle is a spinning body pinned to the ground at its center.
+      const ideal = o.type === 'pulley' && !(o.mass > 0);
+      const isStatic = o.fixed && !(o.type === 'pulley' && o.mass > 0);
+      const body = this.world.createBody({
+        type: isStatic ? 'static' : 'dynamic',
+        position: new planck.Vec2(o.x, o.y), angle: o.angle || 0,
+        linearVelocity: new planck.Vec2(+o.vx || 0, +o.vy || 0), angularVelocity: +o.omega || 0,
+      });
+      const ud = { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: o.stick, id: o.id };
+      const fd = (u = ud) => ({ density: 0, friction: u.mu_s, restitution: u.e, userData: u, filterMaskBits: o.collide ? 0xffff : 0 });
+      // Polygons get a skin of SKIN around them, so build them that much smaller than drawn.
+      const box = (hw, hh) => new planck.Box(Math.max(SKIN, hw - SKIN), Math.max(SKIN, hh - SKIN));
+      switch (o.type) {
+        case 'block': body.createFixture(box(o.w / 2, o.h / 2), fd()); break;
+        case 'cart': {
+          // Phase 2 cart = "frictionless cart": the wheels touch the ground but have mu = 0.
+          body.createFixture(box(o.w / 2, o.h / 2), fd());
+          const wheel = { ...ud, mu_s: 0, mu_k: 0 };
+          for (const sx of [-0.3, 0.3]) body.createFixture(new planck.Circle(new planck.Vec2(o.w * sx, -o.h / 2 - o.wheelR), o.wheelR), fd(wheel));
+          break;
+        }
+        case 'disk': case 'pulley': body.createFixture(new planck.Circle(o.r), fd()); break;
+        case 'rod': body.createFixture(box(o.len / 2, rodHalfThick(o)), fd()); break;
+        case 'pointmass': body.createFixture(new planck.Circle(pmRadius(o)), fd()); break;
+      }
+      let m = +o.mass || 0, I = inertiaOf(o);
+      if (!isStatic) {
+        if (m <= 0) { m = MASS_FLOOR; if (!ideal) this.warn(`${META[o.type].name} ${o.id} has mass 0, so it was given ${MASS_FLOOR} kg.`); }
+        if (!(I > 0)) I = 0.5 * m * (o.r || 0.05) ** 2;
+        // Center of mass at the body origin, I about that point.
+        body.setMassData({ mass: m, center: new planck.Vec2(0, 0), I });
+      }
+      this.recs.set(o.id, { o, body, m, I, ideal, angle0: o.angle || 0 });
+      if (o.type === 'pulley' && o.fixed && o.mass > 0) {
+        this.world.createJoint(new planck.RevoluteJoint({}, this.ground, body, new planck.Vec2(o.x, o.y)));
+      }
+    }
+  }
+  // Every body record whose shape covers world point p (the referenced body first, then movable ones).
+  bodiesAt(p, preferId = null) {
+    const out = [...this.recs.values()].filter((r) => containsPoint(r.o, p));
+    const rank = (r) => (r.o.id === preferId ? 0 : r.body.isDynamic() ? 1 : 2);
+    return out.sort((a, b) => rank(a) - rank(b));
+  }
+  // Where a connector end (spring, rope, force...) attaches: a body and a point in that body's frame.
+  attach(pt) {
+    const p = P(pt);
+    let rec = null;
+    if (pt && pt.ref) {
+      const o = byId(pt.ref);
+      if (o && this.recs.has(o.id)) rec = this.recs.get(o.id);
+      else if (o && (o.type === 'pin' || o.type === 'weld' || isMasslessRod(o))) rec = this.bodiesAt(p, refBodyId(pt))[0] || null;
+    }
+    const body = rec ? rec.body : this.ground;
+    return { body, local: body.getLocalPoint(v2(p)), rec };
+  }
+  // "Glue": a pin, weld, force or moment placed on a movable body (but not snapped to an anchor)
+  // should ride along with that body, so turn its free point into a body-local '@' reference.
+  glueFreePoints() {
+    for (const o of scene.objects) {
+      if (!['pin', 'weld', 'force', 'moment'].includes(o.type) || !o.p || o.p.ref) continue;
+      if (o.type === 'pin' && o.mount === 'ground') continue;
+      const hit = this.bodiesAt(o.p).find((r) => r.body.isDynamic());
+      if (!hit) continue;
+      const l = W2L(hit.o, o.p);
+      o.p = { ref: hit.o.id, a: '@', lx: l.x, ly: l.y, x: o.p.x, y: o.p.y };
+    }
+  }
+
+  /* ---- Rigid joints (Box2D constraints) ---- */
+  buildJoints() {
+    for (const o of scene.objects) {
+      if (o.type === 'pin' || o.type === 'weld') this.buildPin(o);
+      else if (isMasslessRod(o)) this.buildMasslessRod(o);
+      else if (o.type === 'track') this.buildTrack(o);
+    }
+  }
+  buildPin(o) {
+    const p = P(o.p), list = this.bodiesAt(p, refBodyId(o.p));
+    if (!list.some((r) => r.body.isDynamic())) return;
+    const pairs = [];
+    if ((o.type === 'pin' && o.mount === 'ground') || list.length === 1) {
+      for (const r of list) if (r.body.isDynamic()) pairs.push([this.ground, r.body]);
+    } else {
+      for (const r of list.slice(1)) if (list[0].body.isDynamic() || r.body.isDynamic()) pairs.push([list[0].body, r.body]);
+    }
+    for (const [A, B] of pairs) {
+      const j = o.type === 'pin' ? new planck.RevoluteJoint({}, A, B, v2(p)) : new planck.WeldJoint({ frequencyHz: 0 }, A, B, v2(p));
+      this.world.createJoint(j);
+      if (o.type === 'pin' && o.torsionK > 0) this.torsions.push({ k: o.torsionK, A, B, rel0: B.getAngle() - A.getAngle() });
+    }
+  }
+  buildMasslessRod(o) {
+    // A massless rigid rod only keeps its two ends a fixed distance apart: Box2D's DistanceJoint
+    // with frequencyHz = 0 (rigid, not springy). Each end grabs whatever body is there, or the ground.
+    const pa = L2W(o, -o.len / 2, 0), pb = L2W(o, o.len / 2, 0);
+    const end = (p) => { const r = this.bodiesAt(p)[0]; const body = r ? r.body : this.ground; return { body, local: body.getLocalPoint(v2(p)) }; };
+    const ea = end(pa), eb = end(pb);
+    if (ea.body === eb.body || (!ea.body.isDynamic() && !eb.body.isDynamic())) { this.warn(`Massless rod ${o.id} isn't connecting two things, so it does nothing.`); return; }
+    this.world.createJoint(new planck.DistanceJoint({ frequencyHz: 0, dampingRatio: 0 }, ea.body, eb.body, v2(pa), v2(pb)));
+    this.rodLinks.push({ o, ea, eb });
+  }
+  buildTrack(o) {
+    // Any movable body whose center lies on the track slides along it. Without "may rotate" it's a
+    // prismatic joint (no rotation, the track ends are stops). With it, a wheel joint (free spin).
+    const a = P(o.a), b = P(o.b), L = V.dist(a, b);
+    if (L < 1e-6) return;
+    const u = V.unit(V.sub(b, a)), tol = Math.max(PIN_TOL, o.width / 2 / scene.settings.pxPerM);
+    for (const r of this.recs.values()) {
+      if (!r.body.isDynamic()) continue;
+      const d = V.sub(r.o, a), s = V.dot(d, u), off = Math.abs(V.cross(u, d));
+      if (off > tol || s < -tol || s > L + tol) continue;
+      const c = new planck.Vec2(r.o.x, r.o.y);
+      const j = o.rotate
+        ? new planck.WheelJoint({ frequencyHz: 0, dampingRatio: 0 }, this.ground, r.body, c, v2(u))
+        : new planck.PrismaticJoint({ enableLimit: true, lowerTranslation: -s, upperTranslation: L - s }, this.ground, r.body, c, v2(u));
+      this.world.createJoint(j);
+    }
+  }
+
+  /* ---- Explicit force elements: springs, dampers, actuators ---- */
+  buildElements() {
+    for (const o of scene.objects) {
+      if (!['spring', 'damper', 'springdamper', 'actuator'].includes(o.type) || !o.a || !o.b) continue;
+      const el = { o, A: this.attach(o.a), B: this.attach(o.b), T: 0 };
+      if (!el.A.body.isDynamic() && !el.B.body.isDynamic()) continue;
+      if (o.type === 'actuator') {
+        try { el.law = Expr.compile(String(o.law), ['t', 'd', 'v']); } catch (err) { el.law = () => 0; this.warn(`Actuator ${o.id}: ${err.message} (using F = 0).`); }
+      }
+      this.elements.push(el);
+    }
+  }
+  // Tension in an element (N). Positive = pulling its two ends together.
+  //   spring:   T = k*delta            (nonlinear: k2*delta + k3*delta^3), delta = L - L0
+  //   damper:   T = c*dL/dt            (resists the ends moving apart or together)
+  //   actuator: T = -F(t, delta, v)    (F > 0 pushes the ends apart)
+  tension(el, L, Ldot) {
+    const o = el.o, d = L - o.restLen;
+    let T = 0;
+    if (o.type === 'spring' || o.type === 'springdamper') T += o.nonlinear ? o.k2 * d + o.k3 * d * d * d : o.k * d;
+    if (o.type === 'damper' || o.type === 'springdamper') T += o.c * Ldot;
+    if (o.type === 'actuator') T -= el.law({ t: this.tMid, d, v: Ldot });
+    return T;
+  }
+  applyElement(el) {
+    const A = el.A.body, B = el.B.body;
+    const pA = A.getWorldPoint(el.A.local), pB = B.getWorldPoint(el.B.local);
+    const L = V.dist(pA, pB);
+    if (L < 1e-9) return;
+    const u = V.mul(V.sub(pB, pA), 1 / L);                      // unit vector A -> B
+    const vA = A.getLinearVelocityFromLocalPoint(el.A.local), vB = B.getLinearVelocityFromLocalPoint(el.B.local);
+    const Ldot = V.dot(V.sub(vB, vA), u);                       // rate of stretching
+    const T = this.tension(el, L, Ldot);
+    el.T = T;
+    // Equal and opposite (Newton's 3rd law), along the line between the attachment points.
+    A.applyForce(new planck.Vec2(u.x * T, u.y * T), pA, true);
+    B.applyForce(new planck.Vec2(-u.x * T, -u.y * T), pB, true);
+  }
+
+  /* ---- Applied forces F(t) and moments M(t) ---- */
+  buildLoads() {
+    for (const o of scene.objects) {
+      if ((o.type !== 'force' && o.type !== 'moment') || !o.p) continue;
+      const at = this.attach(o.p);
+      if (!at.body.isDynamic()) { this.warn(`${META[o.type].name} ${o.id} isn't on a movable body, so it does nothing.`); continue; }
+      let law;
+      try { law = Expr.compile(String(o.law), ['t']); } catch (err) { this.warn(`${META[o.type].name} ${o.id}: ${err.message} (using 0).`); continue; }
+      this.loads.push({ o, at, law, angle0: o.angle, theta0: at.body.getAngle() });
+    }
+  }
+  applyLoad(ld) {
+    const body = ld.at.body, mag = ld.law({ t: this.tMid });
+    if (!isFinite(mag)) return;
+    if (ld.o.type === 'moment') { body.applyTorque(mag, true); return; }
+    // world frame: fixed direction. body frame: the direction turns with the body.
+    const deg = ld.o.frame === 'body' ? ld.angle0 + toDeg(body.getAngle() - ld.theta0) : ld.o.angle;
+    const d = V.dir(toRad(deg));
+    body.applyForce(new planck.Vec2(d.x * mag, d.y * mag), body.getWorldPoint(ld.at.local), true);
+  }
+  applyTorsion(ts) {
+    // Torsion spring at a pin: torque = -kappa * (relative angle - starting relative angle)
+    const tau = -ts.k * (ts.B.getAngle() - ts.A.getAngle() - ts.rel0);
+    ts.B.applyTorque(tau, true); ts.A.applyTorque(-tau, true);
+  }
+
+  /* ---- Ropes (the constraint itself is in Section 17) ---- */
+  buildRopes() {
+    for (const o of scene.objects) {
+      if (o.type !== 'rope' || !o.a || !o.b) continue;
+      const endA = this.attach(o.a), endB = this.attach(o.b);
+      const nodes = [{ kind: 'end', body: endA.body, local: endA.local }];
+      for (const v of o.via) {
+        const q = byId(v.id), rec = this.recs.get(v.id);
+        if (!q || !rec) continue;
+        // "grip" = the rope can't slip (a real pulley or disk that turns); "slide" = ideal pulley.
+        nodes.push({ kind: rec.body.isDynamic() && !rec.ideal ? 'grip' : 'slide', body: rec.body, R: q.r, s: v.s });
+      }
+      nodes.push({ kind: 'end', body: endB.body, local: endB.local });
+      // Split the rope into separate segments at every no-slip pulley: the pulley's friction lets
+      // the tension differ on its two sides, so each side is its own constraint.
+      let start = 0, first = true;
+      for (let i = 1; i < nodes.length; i++) {
+        if (nodes[i].kind !== 'grip' && i !== nodes.length - 1) continue;
+        const segNodes = nodes.slice(start, i + 1).map((nd) => ({ ...nd }));
+        start = i;
+        const bodies = [...new Set(segNodes.map((nd) => nd.body))].filter((b) => b.isDynamic());
+        if (!bodies.length) continue;                            // rope between two fixed things: nothing to do
+        const seg = new RopeSegment(this, segNodes, first ? +o.slack || 0 : 0);
+        first = false;
+        seg.ropeId = o.id;
+        this.world.createJoint(seg);
+        // A rope touches more than 2 bodies: tie the extras into the same island (see Section 17).
+        for (const b of bodies.slice(2)) this.world.createJoint(new LinkJoint(bodies[0], b));
+        this.ropes.push(seg);
+      }
+    }
+  }
+
+  /* ---- Substeps for stiff springs ----
+     An explicit spring is only accurate when omega*dt is small. omega = sqrt(k / m_eff), where
+     1/m_eff = (1/m_A + (r_A x u)^2 / I_A) + (same for B): how easily the two ends move along the spring. */
+  invMassAlong(end, u) {
+    const b = end.body;
+    if (!b.isDynamic()) return 0;
+    const r = V.sub(b.getWorldPoint(end.local), b.getWorldCenter());
+    return b.m_invMass + b.m_invI * V.cross(r, u) ** 2;
+  }
+  chooseSubsteps() {
+    let rate = 0;
+    for (const el of this.elements) {
+      const o = el.o, pA = el.A.body.getWorldPoint(el.A.local), pB = el.B.body.getWorldPoint(el.B.local);
+      const u = V.unit(V.sub(pB, pA)), mInv = this.invMassAlong(el.A, u) + this.invMassAlong(el.B, u);
+      if (o.type === 'spring' || o.type === 'springdamper') {
+        const d = V.dist(pA, pB) - o.restLen;
+        const k = o.nonlinear ? Math.abs(o.k2) + 3 * Math.abs(o.k3) * d * d : Math.abs(o.k);
+        rate = Math.max(rate, Math.sqrt(k * mInv));
+      }
+      if (o.type === 'damper' || o.type === 'springdamper') rate = Math.max(rate, Math.abs(o.c) * mInv);
+    }
+    for (const ts of this.torsions) rate = Math.max(rate, Math.sqrt(ts.k * (ts.A.m_invI + ts.B.m_invI)));
+    const need = Math.ceil(rate * this.dt / OMEGA_DT_TARGET);
+    this.sub = Math.min(MAX_SUBSTEPS, Math.max(1, need));
+    this.omegaDt = rate * this.dt / this.sub;
+    if (need > MAX_SUBSTEPS) this.warn(`Too stiff: ω·Δt = ${this.omegaDt.toFixed(3)} even with ${MAX_SUBSTEPS} substeps. Use a smaller Δt, softer springs or heavier bodies.`);
+  }
+
+  /* ---- Contacts: static/kinetic friction switch, restitution, stick on contact ---- */
+  listenContacts() {
+    const wm = new planck.WorldManifold();
+    // pre-solve runs for every touching contact, every step, before Box2D solves it.
+    this.world.on('pre-solve', (contact) => {
+      const fA = contact.getFixtureA(), fB = contact.getFixtureB();
+      const a = fA.getUserData() || NO_UD, b = fB.getUserData() || NO_UD;
+      const bA = fA.getBody(), bB = fB.getBody();
+      contact.getWorldManifold(wm);
+      const t = { x: -wm.normal.y, y: wm.normal.x };            // tangent direction
+      let slip = 0;
+      for (let i = 0; i < contact.getManifold().pointCount; i++) {
+        const p = wm.points[i];
+        const rel = V.sub(bB.getLinearVelocityFromWorldPoint(p), bA.getLinearVelocityFromWorldPoint(p));
+        slip = Math.max(slip, Math.abs(V.dot(rel, t)));
+      }
+      // Box2D has one friction coefficient, so pick mu_s or mu_k each step from the sliding speed.
+      contact.setFriction(slip > SLIP_SPEED ? Math.min(a.mu_k, b.mu_k) : Math.min(a.mu_s, b.mu_s));
+      contact.setRestitution(a.stick || b.stick ? 0 : Math.max(a.e, b.e));
+    });
+    // Stick on contact: remember the pair now (the world is locked during callbacks), weld after the step.
+    this.world.on('begin-contact', (contact) => {
+      const fA = contact.getFixtureA(), fB = contact.getFixtureB();
+      const a = fA.getUserData() || NO_UD, b = fB.getUserData() || NO_UD;
+      if (!(a.stick || b.stick)) return;
+      const key = [a.id, b.id].sort().join('|');
+      if (this.stuck.has(key)) return;
+      this.stuck.add(key);
+      contact.getWorldManifold(wm);
+      const p = contact.getManifold().pointCount ? { x: wm.points[0].x, y: wm.points[0].y } : V.mul(V.add(fA.getBody().getPosition(), fB.getBody().getPosition()), 0.5);
+      this.stickQueue.push({ A: fA.getBody(), B: fB.getBody(), p });
+    });
+  }
+  flushStick() {
+    for (const s of this.stickQueue) this.world.createJoint(new planck.WeldJoint({ frequencyHz: 0 }, s.A, s.B, v2(s.p)));
+    this.stickQueue = [];
+  }
+
+  /* ---- The physics loop: one fixed time step dt, split into `sub` equal substeps ---- */
+  step() {
+    const h = this.dt / this.sub;
+    for (let i = 0; i < this.sub; i++) {
+      // 1. Explicit forces from the current positions and velocities (Box2D clears them after each step).
+      //    Time-varying laws F(t) are read at the middle of the substep (exact for F = a + b t).
+      this.tMid = this.t + h / 2;
+      for (const el of this.elements) this.applyElement(el);
+      for (const ld of this.loads) this.applyLoad(ld);
+      for (const ts of this.torsions) this.applyTorsion(ts);
+      // 2. Box2D: add gravity + forces to velocities, solve joints/contacts/ropes, move the bodies.
+      this.world.step(h, this.velIters, this.posIters);
+      this.t += h;
+      // 3. Joints that had to wait until the world was unlocked.
+      if (this.stickQueue.length) this.flushStick();
+    }
+    this.steps++;
+    this.t = this.steps * this.dt;                               // avoid round-off build-up
+  }
+
+  // Copy body positions back into the scene so the normal renderer draws the moving system.
+  sync() {
+    for (const r of this.recs.values()) {
+      const p = r.body.getPosition();
+      r.o.x = p.x; r.o.y = p.y; r.o.angle = r.body.getAngle();
+    }
+    for (const rl of this.rodLinks) Object.assign(rl.o, rodGeom(rl.ea.body.getWorldPoint(rl.ea.local), rl.eb.body.getWorldPoint(rl.eb.local)));
+    for (const ld of this.loads) if (ld.o.type === 'force' && ld.o.frame === 'body') ld.o.angle = ld.angle0 + toDeg(ld.at.body.getAngle() - ld.theta0);
+  }
+
+  // Mechanical energy (J). U_g is measured from y = 0.
+  energy() {
+    const g = scene.settings.g;
+    let K = 0, Kr = 0, Ug = 0, Us = 0;
+    for (const r of this.recs.values()) {
+      if (!r.body.isDynamic()) continue;
+      const v = r.body.getLinearVelocity(), w = r.body.getAngularVelocity();
+      K += 0.5 * r.m * (v.x * v.x + v.y * v.y);
+      Kr += 0.5 * r.I * w * w;
+      Ug += r.m * g * r.body.getPosition().y;
+    }
+    for (const el of this.elements) {
+      const o = el.o;
+      if (o.type !== 'spring' && o.type !== 'springdamper') continue;
+      const d = V.dist(el.A.body.getWorldPoint(el.A.local), el.B.body.getWorldPoint(el.B.local)) - o.restLen;
+      Us += o.nonlinear ? 0.5 * o.k2 * d * d + 0.25 * o.k3 * d ** 4 : 0.5 * o.k * d * d;
+    }
+    for (const ts of this.torsions) { const d = ts.B.getAngle() - ts.A.getAngle() - ts.rel0; Us += 0.5 * ts.k * d * d; }
+    return { K, Kr, Ug, Us, total: K + Kr + Ug + Us };
+  }
+}
+
+/* =====================================================================
+   17. PHYSICS: CUSTOM ROPE CONSTRAINT (ropes over pulleys)
+   Box2D has no rope-over-pulley joint, so we write one. A rope segment
+   is a list of nodes: an end, any number of ideal pulleys, another end.
+   (A no-slip pulley always ends one segment and starts the next.)
+
+   The rule: the rope's length along its path can't exceed its rest
+   length. It can go slack (shorter), but never stretch: tension only.
+
+   Like every Box2D joint we provide three functions the solver calls:
+     initVelocityConstraints   once per step: geometry + Jacobian
+     solveVelocityConstraints  many times: fix velocities so dL/dt <= 0 when taut
+     solvePositionConstraints  a few times: remove any stretch that crept in
+
+   The Jacobian J says how the rope length changes when the bodies move:
+     dL/dt = sum over bodies of (Jv . v + Jw * omega)
+   Each node contributes Jv = -E and Jw = -(r x E), where E is the sum of
+   unit vectors pointing from the node's contact point along its spans,
+   and r runs from the body's center to that contact point. Pulling a
+   node along E shortens the rope, which is why the signs are negative.
+   ===================================================================== */
+const wrapPi = (a) => a - TAU * Math.floor((a + Math.PI) / TAU);   // into [-pi, pi)
+// Body pose: during a solve Box2D keeps the moving bodies' working positions in c_position.
+const poseOf = (body, inSolver) => (inSolver && body.isDynamic() ? body.c_position : body.m_sweep);
+const posePt = (ps, l) => { const c = Math.cos(ps.a), s = Math.sin(ps.a); return { x: ps.c.x + c * l.x - s * l.y, y: ps.c.y + s * l.x + c * l.y }; };
+
+// If the Planck script failed to load, keep the editor working (Play will explain the problem).
+const JointBase = window.planck ? planck.Joint : class {};
+class RopeSegment extends JointBase {
+  constructor(sim, nodes, slack) {
+    const dyn = [...new Set(nodes.map((nd) => nd.body))].filter((b) => b.isDynamic());
+    // bodyA / bodyB only matter for Box2D's island search; LinkJoints cover any extra bodies.
+    super({ collideConnected: true }, dyn[0], dyn[1] || sim.ground);
+    this.m_type = 'rope-segment';
+    this.nodes = nodes;
+    this.acc = 0;             // accumulated impulse (N s), <= 0: negative means the rope pulls
+    this.invDt = 0;
+    this.J = []; this.mass = 0; this.L = 0;
+    // No-slip pulley at either end: track the tangent point angle phi and the pulley angle theta.
+    nodes.forEach((nd, i) => {
+      if (nd.kind !== 'grip') return;
+      nd.role = i === 0 ? 1 : -1;              // +1 = rope leaves this pulley, -1 = arrives at it
+      nd.phi = this.contactAngle(nd, i, false);
+      nd.phi0 = nd.phi;
+      nd.theta0 = nd.body.getAngle();
+    });
+    this.Lrest = this.geom(false, false).L + slack;
+  }
+  contactAngle(nd, i, inSolver) {
+    const g = this.spans(inSolver);
+    const c = g.C[i], p = i === 0 ? g.spans[0].p1 : g.spans[i - 1].p2;
+    return Math.atan2(p.y - c.y, p.x - c.x);
+  }
+  // Node centers and the straight spans between them (tangent lines, same math as the drawing).
+  spans(inSolver) {
+    const C = [], Rs = [], poses = [];
+    for (const nd of this.nodes) {
+      const ps = poseOf(nd.body, inSolver);
+      poses.push(ps);
+      if (nd.kind === 'end') { C.push(posePt(ps, nd.local)); Rs.push(0); }
+      else { C.push({ x: ps.c.x, y: ps.c.y }); Rs.push(nd.R * nd.s); }
+    }
+    const spans = [];
+    for (let i = 0; i < C.length - 1; i++) spans.push(tangent(C[i], Rs[i], C[i + 1], Rs[i + 1]));
+    return { C, poses, spans };
+  }
+  // Rope length L and Jacobian J (one entry per moving body).
+  geom(inSolver, commit) {
+    const { C, poses, spans } = this.spans(inSolver), n = this.nodes.length;
+    let L = 0;
+    for (const sp of spans) L += V.dist(sp.p1, sp.p2);
+    const J = new Map();
+    const addJ = (body, E, r) => {
+      if (!body.isDynamic()) return;
+      if (!J.has(body)) J.set(body, { body, x: 0, y: 0, w: 0 });
+      const j = J.get(body);
+      j.x -= E.x; j.y -= E.y; j.w -= V.cross(r, E);
+    };
+    this.nodes.forEach((nd, i) => {
+      const eIn = i > 0 ? V.unit(V.sub(spans[i - 1].p1, spans[i - 1].p2)) : null;      // back along the previous span
+      const eOut = i < n - 1 ? V.unit(V.sub(spans[i].p2, spans[i].p1)) : null;         // forward along the next span
+      const ctr = poses[i].c;
+      if (nd.kind === 'end') {
+        addJ(nd.body, eOut || eIn, V.sub(C[i], ctr));
+      } else if (nd.kind === 'slide') {
+        // Ideal pulley: the rope slides, so only the pulley's center matters (r = 0, no torque).
+        addJ(nd.body, V.add(eIn, eOut), { x: 0, y: 0 });
+        const pin = spans[i - 1].p2, pout = spans[i].p1;
+        const aIn = Math.atan2(pin.y - C[i].y, pin.x - C[i].x), aOut = Math.atan2(pout.y - C[i].y, pout.x - C[i].x);
+        L += nd.R * mod(nd.s * (aOut - aIn), TAU);                                    // rope wrapped on the pulley
+      } else {
+        // No-slip pulley: the rope moves with the pulley's rim. The wrapped length counted in this
+        // segment changes when the tangent point moves (phi) and when the pulley turns (theta).
+        const p = i === 0 ? spans[0].p1 : spans[i - 1].p2;
+        addJ(nd.body, i === 0 ? eOut : eIn, V.sub(p, C[i]));
+        const phi = nd.phi + wrapPi(Math.atan2(p.y - C[i].y, p.x - C[i].x) - nd.phi);  // unwrapped angle
+        if (commit) nd.phi = phi;
+        L += nd.role * nd.R * nd.s * ((phi - nd.phi0) - (poses[i].a - nd.theta0));
+      }
+    });
+    return { L, J: [...J.values()] };
+  }
+  effMass(J) {
+    let k = 0;
+    for (const j of J) k += j.body.m_invMass * (j.x * j.x + j.y * j.y) + j.body.m_invI * j.w * j.w;
+    return k > 0 ? 1 / k : 0;
+  }
+  applyImpulse(lam) {
+    for (const j of this.J) {
+      const b = j.body, v = b.c_velocity;
+      v.v.x += b.m_invMass * j.x * lam; v.v.y += b.m_invMass * j.y * lam; v.w += b.m_invI * j.w * lam;
+    }
+  }
+  initVelocityConstraints(step) {
+    const g = this.geom(true, true);
+    this.L = g.L; this.J = g.J; this.mass = this.effMass(g.J); this.invDt = step.inv_dt;
+    if (step.warmStarting) { this.acc *= step.dtRatio; this.applyImpulse(this.acc); } else this.acc = 0;
+  }
+  solveVelocityConstraints(step) {
+    let Cdot = 0;
+    for (const j of this.J) { const v = j.body.c_velocity; Cdot += j.x * v.v.x + j.y * v.v.y + j.w * v.w; }
+    const C = this.L - this.Lrest;
+    if (C < 0) Cdot += step.inv_dt * C;             // slack: allow the gap to close, but not overshoot
+    const old = this.acc;
+    this.acc = Math.min(0, old - this.mass * Cdot); // tension only: impulse can never push
+    this.applyImpulse(this.acc - old);
+  }
+  solvePositionConstraints(step) {
+    const g = this.geom(true, false);
+    const C = g.L - this.Lrest;
+    const mass = this.effMass(g.J);
+    const lam = -mass * Math.min(Math.max(C, 0), planck.Settings.maxLinearCorrection);
+    for (const j of g.J) {
+      const b = j.body, p = b.c_position;
+      p.c.x += b.m_invMass * j.x * lam; p.c.y += b.m_invMass * j.y * lam; p.a += b.m_invI * j.w * lam;
+    }
+    return C < planck.Settings.linearSlop;
+  }
+  get tension() { return -this.acc * this.invDt; }   // N
+  getAnchorA() { return this.m_bodyA.getPosition(); }
+  getAnchorB() { return this.m_bodyB.getPosition(); }
+  getReactionForce() { return new planck.Vec2(0, 0); }
+  getReactionTorque() { return 0; }
+}
+// A joint that does nothing. Box2D only solves bodies together if a joint or contact links them,
+// so these tie every body a rope touches into the rope's island.
+class LinkJoint extends JointBase {
+  constructor(A, B) { super({ collideConnected: true }, A, B); this.m_type = 'link'; }
+  initVelocityConstraints() {}
+  solveVelocityConstraints() {}
+  solvePositionConstraints() { return true; }
+  getAnchorA() { return this.m_bodyA.getPosition(); }
+  getAnchorB() { return this.m_bodyB.getPosition(); }
+  getReactionForce() { return new planck.Vec2(0, 0); }
+  getReactionTorque() { return 0; }
+}
+
+/* =====================================================================
+   18. SIMULATION CONTROLS (play / pause / step / reset)
+   Play saves a JSON snapshot of the scene; Reset restores it, so the
+   same run replays exactly. The physics always advances in whole steps
+   of dt no matter the frame rate (an "accumulator" collects real time).
+   ===================================================================== */
+const run = { sim: null, snapshot: null, playing: false, acc: 0, speed: 1, last: 0, slow: false, panelAt: 0 };
+const FRAME_BUDGET_MS = 14;
+
+function startSim() {
+  if (run.sim) return true;
+  run.snapshot = JSON.stringify(scene);
+  try { run.sim = new Sim(); }
+  catch (err) {
+    console.error(err);
+    scene = JSON.parse(run.snapshot); run.sim = null; run.snapshot = null;
+    msg('Could not start the simulation: ' + err.message);
+    return false;
+  }
+  if (ui.tool !== 'select') setTool('select');
+  ui.pending = []; ui.rope = null;
+  run.sim.sync(); render(); showPanel();
+  return true;
+}
+function playPause() {
+  if (!run.sim && !startSim()) return;
+  run.playing = !run.playing; run.acc = 0; run.slow = false;
+  updateSimUI();
+}
+function stepOnce() {
+  if (!run.sim && !startSim()) return;
+  run.playing = false;
+  run.sim.step(); run.sim.sync(); render(); showPanel(); updateSimUI();
+}
+function resetSim() {
+  if (!run.snapshot) return;
+  scene = JSON.parse(run.snapshot);
+  endSim();
+  ui.sel = new Set([...ui.sel].filter((id) => byId(id)));
+  render(); showPanel();
+}
+// Forget the simulation without restoring anything (used before New / Open / Examples).
+function endSim() {
+  run.sim = null; run.snapshot = null; run.playing = false; run.acc = 0; run.slow = false;
+  updateSimUI();
+}
+function updateSimUI() {
+  $('bPlay').textContent = run.playing ? '❚❚ Pause' : '▶ Play';
+  $('tRead').textContent = `t = ${(run.sim ? run.sim.t : 0).toFixed(3)} s`;
+  const w = run.sim ? [...run.sim.warnings] : [];
+  if (run.sim && run.sim.sub > 1) w.unshift(`${run.sim.sub} substeps/step`);
+  if (run.slow) w.push('slower than real time');
+  $('simWarn').textContent = w.join(' · ');
+  $('simWarn').title = w.join('\n');
+}
+function frame(now) {
+  const real = Math.min(0.1, Math.max(0, (now - run.last) / 1000));   // seconds since last frame (capped)
+  run.last = now;
+  if (run.playing && run.sim) {
+    run.acc += real * run.speed;
+    const t0 = performance.now();
+    let n = 0;
+    run.slow = false;
+    while (run.acc >= run.sim.dt) {
+      // Out of time this frame: drop the leftover so the sim runs slower instead of changing its steps.
+      if (performance.now() - t0 > FRAME_BUDGET_MS) { run.acc = 0; run.slow = true; break; }
+      run.sim.step(); run.acc -= run.sim.dt; n++;
+    }
+    if (n) { run.sim.sync(); render(); }
+    // Keep the (read-only) properties panel showing current values, 4 times a second.
+    if (n && ui.sel.size === 1 && now - run.panelAt > 250) { run.panelAt = now; showPanel(); }
+    updateSimUI();
+  }
+  requestAnimationFrame(frame);
+}
+
+/* =====================================================================
+   19. BUILT-IN TESTS
+   Each test builds its own little scene, runs it with the same Sim class
+   the editor uses, and compares a measurement with the textbook answer.
+   ===================================================================== */
+function testScene(build, g = 9.81) {
+  const sc = newScene();
+  sc.settings.g = g;
+  const add = (type, props) => { const o = mk(type, props); o.id = 'o' + (sc.nextId++); sc.objects.push(o); return o; };
+  const R = (o, a) => ({ ref: o.id, a, x: 0, y: 0 });
+  build(add, R);
+  return sc;
+}
+// Run fn with `sc` as the global scene (P(), byId() etc. read the global), then put the editor's scene back.
+function withScene(sc, fn) {
+  const saved = scene;
+  scene = sc;
+  try { return fn(); } finally { scene = saved; }
+}
+function simulate(sc, T, sample) {
+  return withScene(sc, () => {
+    const sim = new Sim();
+    const n = Math.round(T / sim.dt);
+    for (let i = 0; i < n; i++) { sim.step(); if (sample) sample(sim); }
+    return sim;
+  });
+}
+// Period from zero crossings of a velocity: two crossings per period, interpolated linearly.
+function periodFromCrossings(ts, vs) {
+  const cross = [];
+  for (let i = 1; i < vs.length; i++) if ((vs[i - 1] < 0) !== (vs[i] < 0)) cross.push(ts[i - 1] + (0 - vs[i - 1]) * (ts[i] - ts[i - 1]) / (vs[i] - vs[i - 1]));
+  return cross.length < 3 ? NaN : 2 * (cross[cross.length - 1] - cross[0]) / (cross.length - 1);
+}
+const relErr = (a, b) => Math.abs(a - b) / Math.abs(b);
+const recOf = (sim, o) => sim.recs.get(o.id).body;
+
+// Shared setups
+function springMassScene() {
+  // Block on frictionless ground, spring from a wall at x = -1. Rest: block center at x = 0. Start: x = 0.1.
+  return testScene((add, R) => {
+    add('surface', { kind: 'line', pts: [{ x: -2, y: 0 }, { x: 3, y: 0 }], mu_s: 0, mu_k: 0 });
+    const b = add('block', { x: 0.1, y: 0.2, w: 0.4, h: 0.4, mass: 1 });
+    add('spring', { a: free(-1, 0.2), b: R(b, 'l'), k: 100, restLen: 0.8 });
+  });
+}
+const INC = toRad(30), INC_U = { x: Math.cos(INC), y: Math.sin(INC) }, INC_N = { x: -Math.sin(INC), y: Math.cos(INC) };
+const onIncline = (s, h) => V.add(V.mul(INC_U, s), V.mul(INC_N, h));   // s along the slope, h above it
+function inclineScene(mu_s, mu_k, addBody) {
+  return testScene((add) => {
+    add('surface', { kind: 'line', pts: [{ x: 0, y: 0 }, V.mul(INC_U, 7)], mu_s, mu_k });
+    addBody(add);
+  });
+}
+function atwoodScene(pulleyMass) {
+  return testScene((add, R) => {
+    const p = add('pulley', { x: 0, y: 3, r: 0.2, mass: pulleyMass, shape: 'solid disk', fixed: true });
+    const b1 = add('block', { x: -0.2, y: 1.5, w: 0.2, h: 0.2, mass: 2 });
+    const b2 = add('block', { x: 0.2, y: 1.5, w: 0.2, h: 0.2, mass: 3 });
+    add('rope', { a: R(b1, 't'), b: R(b2, 't'), via: [{ id: p.id, s: -1 }] });   // s = -1: over the top
+  });
+}
+
+const TESTS = [
+  { name: 'Spring-mass, m = 1 kg, k = 100 N/m: period', run() {
+    const sc = springMassScene(), ts = [], vs = [];
+    let b;
+    simulate(sc, 3, (sim) => { b = b || recOf(sim, sc.objects[1]); ts.push(sim.t); vs.push(b.getLinearVelocity().x); });
+    const T = periodFromCrossings(ts, vs), want = TAU / 10;
+    return { meas: T.toFixed(4) + ' s', exp: want.toFixed(4) + ' s ±1%', pass: relErr(T, want) <= 0.01 };
+  } },
+  { name: 'Simple pendulum, L = 1 m, 5°: period', run() {
+    const th = toRad(5);
+    const sc = testScene((add) => {
+      add('pin', { p: free(0, 2), mount: 'ground', mountAngle: 90 });
+      add('rod', { ...rodGeom({ x: 0, y: 2 }, { x: Math.sin(th), y: 2 - Math.cos(th) }), mass: 0 });
+      add('pointmass', { x: Math.sin(th), y: 2 - Math.cos(th), mass: 1 });
+    });
+    const ts = [], vs = [];
+    let b;
+    simulate(sc, 7, (sim) => { b = b || recOf(sim, sc.objects[2]); ts.push(sim.t); vs.push(b.getLinearVelocity().x); });
+    const T = periodFromCrossings(ts, vs), want = 2.006;
+    return { meas: T.toFixed(4) + ' s', exp: '2.006 s ±1%', pass: relErr(T, want) <= 0.01 };
+  } },
+  { name: '30° incline, μs = 0.5, μk = 0.3: slides', run() {
+    const sc = inclineScene(0.5, 0.3, (add) => add('block', { ...onIncline(6, 0.2), w: 0.4, h: 0.4, angle: INC, mass: 1 }));
+    let b, v05 = 0, v15 = 0;
+    simulate(sc, 1.5, (sim) => {
+      b = b || recOf(sim, sc.objects[1]);
+      const v = -V.dot(b.getLinearVelocity(), INC_U);             // speed down the slope
+      if (sim.steps === Math.round(0.5 / sim.dt)) v05 = v;
+      v15 = v;
+    });
+    const a = v15 - v05, want = 9.81 * (Math.sin(INC) - 0.3 * Math.cos(INC));
+    return { meas: 'a = ' + a.toFixed(4) + ' m/s²', exp: want.toFixed(3) + ' m/s² ±1%', pass: relErr(a, want) <= 0.01 };
+  } },
+  { name: '30° incline, μs = 0.6: stays put', run() {
+    const sc = inclineScene(0.6, 0.3, (add) => add('block', { ...onIncline(6, 0.2), w: 0.4, h: 0.4, angle: INC, mass: 1 }));
+    let b, p0 = null, p1 = null;
+    simulate(sc, 2, (sim) => { b = b || recOf(sim, sc.objects[1]); const p = b.getPosition(); p1 = { x: p.x, y: p.y }; if (!p0) p0 = p1; });
+    const d = Math.abs(V.dot(V.sub(p1, p0), INC_U));
+    return { meas: 'moved ' + (d * 1000).toFixed(3) + ' mm in 2 s', exp: '< 1 mm', pass: d < 1e-3 };
+  } },
+  { name: 'Atwood 2 kg + 3 kg, massless pulley', run() {
+    const sc = atwoodScene(0);
+    let b, v05 = 0, v1 = 0;
+    simulate(sc, 1, (sim) => { b = b || recOf(sim, sc.objects[2]); const v = -b.getLinearVelocity().y; if (sim.steps === Math.round(0.5 / sim.dt)) v05 = v; v1 = v; });
+    const a = (v1 - v05) / 0.5, want = 9.81 / 5;
+    return { meas: 'a = ' + a.toFixed(4) + ' m/s²', exp: want.toFixed(3) + ' m/s² ±1%', pass: relErr(a, want) <= 0.01 };
+  } },
+  { name: 'Atwood with 2 kg solid-disk pulley (no slip)', run() {
+    const sc = atwoodScene(2);
+    let b, v05 = 0, v1 = 0;
+    simulate(sc, 1, (sim) => { b = b || recOf(sim, sc.objects[2]); const v = -b.getLinearVelocity().y; if (sim.steps === Math.round(0.5 / sim.dt)) v05 = v; v1 = v; });
+    const a = (v1 - v05) / 0.5, want = 9.81 / 6;      // (m2 - m1) g / (m1 + m2 + I/r^2), I/r^2 = 1 kg
+    return { meas: 'a = ' + a.toFixed(4) + ' m/s²', exp: want.toFixed(3) + ' m/s² ±1%', pass: relErr(a, want) <= 0.01 };
+  } },
+  { name: 'Solid disk rolling down 30°, μs = 0.5', run() {
+    const sc = inclineScene(0.5, 0.3, (add) => add('disk', { ...onIncline(6, 0.2), r: 0.2, mass: 1, shape: 'solid disk' }));
+    let b, v05 = 0, v15 = 0, slip = 0;
+    simulate(sc, 1.5, (sim) => {
+      b = b || recOf(sim, sc.objects[1]);
+      const v = b.getLinearVelocity(), w = b.getAngularVelocity(), sp = -V.dot(v, INC_U);
+      if (sim.steps === Math.round(0.5 / sim.dt)) v05 = sp;
+      v15 = sp;
+      // Velocity of the contact point = v_cm + omega x r (r from center to contact = -0.2 n). Zero if rolling.
+      const r = V.mul(INC_N, -0.2), vc = { x: v.x - w * r.y, y: v.y + w * r.x };
+      if (sim.t >= 0.25) slip = Math.max(slip, V.len(vc) / Math.abs(sp));
+    });
+    const a = v15 - v05, want = (2 / 3) * 9.81 * Math.sin(INC);
+    return { meas: `a = ${a.toFixed(4)} m/s², max |v − ωR|/v = ${(slip * 100).toFixed(3)}%`, exp: want.toFixed(3) + ' m/s² ±1%, v = ωR', pass: relErr(a, want) <= 0.01 && slip < 0.01 };
+  } },
+  { name: '1D elastic collision, 1 kg at 2 m/s into 1 kg', run() {
+    const sc = testScene((add) => {
+      add('disk', { x: 0, y: 1, r: 0.1, mass: 1, e: 1, vx: 2 });
+      add('disk', { x: 1, y: 1, r: 0.1, mass: 1, e: 1 });
+    }, 0);
+    const sim = simulate(sc, 1);
+    const v1 = recOf(sim, sc.objects[0]).getLinearVelocity().x, v2 = recOf(sim, sc.objects[1]).getLinearVelocity().x;
+    const p = v1 + v2, K = 0.5 * v1 * v1 + 0.5 * v2 * v2;
+    const pass = Math.abs(v1) < 0.01 && relErr(v2, 2) <= 0.005 && relErr(p, 2) <= 0.005 && relErr(K, 2) <= 0.005;
+    return { meas: `v₁ = ${v1.toFixed(4)}, v₂ = ${v2.toFixed(4)} m/s; p = ${p.toFixed(4)}, K = ${K.toFixed(4)}`, exp: 'v₁ = 0, v₂ = 2; p = 2 kg·m/s, K = 2 J (±0.5%)', pass };
+  } },
+  { name: 'Frictionless spring-mass: energy over 10 s', run() {
+    const sc = springMassScene(), E = [], ts = [];
+    let Ug0;
+    simulate(sc, 10, (sim) => {
+      const e = sim.energy();
+      if (Ug0 === undefined) Ug0 = sim.Ug0;
+      E.push(e.K + e.Kr + e.Us + (e.Ug - Ug0)); ts.push(sim.t);   // oscillation energy (U_g measured from the start)
+    });
+    const E0 = 0.5 * 100 * 0.1 * 0.1;                               // = 0.5 J
+    const maxDev = Math.max(...E.map((e) => Math.abs(e - E0))) / E0;
+    const mean = (a) => a.reduce((s, x) => s + x, 0) / a.length;
+    const drift = (mean(E.filter((e, i) => ts[i] > 9)) - mean(E.filter((e, i) => ts[i] <= 1))) / E0;
+    return { meas: `max |E − E₀|/E₀ = ${(maxDev * 100).toFixed(3)}%, drift = ${(drift * 100).toFixed(3)}%`, exp: '≤ 1%, drift ≈ 0 (< 0.2%)', pass: maxDev <= 0.01 && Math.abs(drift) < 0.002 };
+  } },
+];
+
+async function runTests() {
+  if (run.playing) { run.playing = false; updateSimUI(); }
+  $('testBox').hidden = false;
+  const rows = $('testRows');
+  rows.innerHTML = TESTS.map((T, i) => `<tr><td>${i + 1}</td><td>${esc(T.name)}</td><td id="tm${i}">…</td><td id="te${i}"></td><td id="tr${i}"></td></tr>`).join('');
+  $('testSummary').textContent = 'Running…';
+  let passed = 0;
+  for (let i = 0; i < TESTS.length; i++) {
+    await new Promise((r) => setTimeout(r, 20));                 // let the table repaint between tests
+    let res;
+    const t0 = performance.now();
+    try { res = TESTS[i].run(); } catch (err) { console.error(err); res = { meas: 'error: ' + err.message, exp: '', pass: false }; }
+    $('tm' + i).textContent = res.meas;
+    $('te' + i).textContent = res.exp;
+    $('tr' + i).innerHTML = `<span class="${res.pass ? 'pass' : 'fail'}">${res.pass ? 'PASS' : 'FAIL'}</span> <span class="note">${Math.round(performance.now() - t0)} ms</span>`;
+    if (res.pass) passed++;
+  }
+  $('testSummary').textContent = `${passed} of ${TESTS.length} passed.`;
+  return passed;
+}
+
+/* =====================================================================
+   20. STARTUP
    ===================================================================== */
 function buildToolbar() {
   let h = '', group = '';
@@ -1686,7 +2604,7 @@ function buildToolbar() {
 function init() {
   buildToolbar();
   initPointer(); initKeys();
-  $('bNew').onclick = () => { scene = newScene(); ui.sel.clear(); commit(); render(); showPanel(); };
+  $('bNew').onclick = () => { endSim(); scene = newScene(); ui.sel.clear(); commit(); render(); showPanel(); };
   $('bOpen').onclick = () => $('fileIn').click();
   $('fileIn').onchange = (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -1698,17 +2616,27 @@ function init() {
   $('bUndo').onclick = undo; $('bRedo').onclick = redo; $('bDel').onclick = deleteSel; $('bFit').onclick = fitView;
   $('bSvg').onclick = () => download('diagram.svg', exportSVGString(), 'image/svg+xml');
   $('bPng').onclick = exportPNG;
+  // simulation controls
+  $('bPlay').onclick = playPause;
+  $('bStep').onclick = stepOnce;
+  $('bReset').onclick = resetSim;
+  $('speed').oninput = () => { run.speed = +$('speed').value; $('speedLbl').textContent = run.speed.toFixed(1) + '×'; };
+  $('bTests').onclick = runTests;
+  $('bTestRun').onclick = runTests;
+  $('bTestClose').onclick = () => { $('testBox').hidden = true; };
   window.addEventListener('resize', render);
   view.oy = $('svg').clientHeight - 60;
   let saved = null;
   try { saved = localStorage.getItem('mechSandbox.autosave'); } catch (e) { saved = null; }
-  if (saved) { try { scene = JSON.parse(saved); } catch (e) { scene = newScene(); } }
+  if (saved) { try { scene = fillDefaults(JSON.parse(saved)); } catch (e) { scene = newScene(); } }
   commit();
+  updateSimUI();
+  requestAnimationFrame((now) => { run.last = now; requestAnimationFrame(frame); });
   setTool('select');
   showPanel();
   if (saved) fitView();
 }
-window.onMathReady = () => { TEX.ready = true; TEX.cache.clear(); render(); showPanel(); };
+window.onMathReady = () => { TEX.ready = true; texReset(); render(); showPanel(); };
 init();
 if (window.MathJax && MathJax.tex2svg) window.onMathReady();
 </script>
