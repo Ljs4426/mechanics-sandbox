@@ -5,8 +5,8 @@
 <title>Mechanics Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
-  MECHANICS SANDBOX - Phase 1 (editor + textbook look)
-  ----------------------------------------------------
+  MECHANICS SANDBOX - Phase 2 (editor + core physics)
+  ---------------------------------------------------
   One self-contained file. Sections in the <script> below:
     1. Utilities (vector math)
     2. Safe expression parser (no eval)
@@ -23,7 +23,11 @@
    13. Undo/redo, clipboard, delete
    14. Save / load / export
    15. Example scenes (the 4 reference diagrams)
-   16. Startup
+   16. Physics: building a Planck world from the scene
+   17. Physics: custom rope constraint (ropes over pulleys)
+   18. Simulation controls (play / pause / step / reset, fixed time step)
+   19. Built-in tests
+   20. Startup
   Coordinates: the scene is stored in METERS with +y UP (textbook convention).
   Only the renderer converts to screen pixels (where SVG's +y is DOWN).
 -->
@@ -63,6 +67,19 @@
   .obj { cursor: pointer; }
   #overlay { pointer-events: none; }
   #overlay .handle { pointer-events: all; cursor: crosshair; }
+  /* simulation controls */
+  #bPlay { min-width: 76px; font-weight: 600; }
+  #tRead { font-variant-numeric: tabular-nums; min-width: 92px; }
+  #simWarn { color: #a40; font-size: 12px; }
+  #speed { width: 90px; vertical-align: middle; }
+  .locknote { background: #fff4d6; border: 1px solid #e0c060; padding: 4px 6px; margin-bottom: 6px; font-size: 12px; }
+  /* test results window */
+  #testBox { position: fixed; inset: 0; background: rgba(0,0,0,0.25); display: flex; align-items: center; justify-content: center; z-index: 10; }
+  #testBox[hidden] { display: none; }
+  #testBox .inner { background: #fff; border: 1px solid #888; padding: 12px 16px; max-width: 920px; width: 94%; max-height: 90%; overflow: auto; }
+  #testBox table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+  #testBox td, #testBox th { border-bottom: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .pass { color: #070; font-weight: 600; } .fail { color: #b00; font-weight: 600; }
 </style>
 
 <!-- MathJax configuration must exist BEFORE the MathJax script loads -->
@@ -80,6 +97,8 @@
   };
 </script>
 <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js"></script>
+<!-- Planck.js (JavaScript port of Box2D): rigid bodies, contacts, friction, joints -->
+<script src="https://cdn.jsdelivr.net/npm/planck@1.5.0/dist/planck.min.js"></script>
 </head>
 <body>
 <div id="topbar">
@@ -101,9 +120,24 @@
   <button id="bSvg">Export SVG</button>
   <button id="bPng">Export PNG</button>
   <span class="sep"></span>
+  <button id="bPlay" title="Play / pause the simulation">▶ Play</button>
+  <button id="bStep" title="Advance one time step">Step</button>
+  <button id="bReset" title="Back to t = 0 (same run replays exactly)">Reset</button>
+  <label>Speed <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1"></label><span id="speedLbl">1.0×</span>
+  <span id="tRead">t = 0.000 s</span>
+  <button id="bTests">Run tests</button>
+  <span id="simWarn"></span>
+  <span class="sep"></span>
   <span id="exactBox">Length, angle°: <input id="exact" type="text" placeholder="e.g. 2, 30"> (Enter)</span>
   <input id="fileIn" type="file" accept=".json,application/json" style="display:none">
 </div>
+<div id="testBox" hidden><div class="inner">
+  <h3 style="margin:0">Built-in physics tests</h3>
+  <p class="note">Each test builds its own scene, runs it with the same engine as the editor, and compares the measurement with the textbook answer.</p>
+  <table><thead><tr><th>#</th><th>Test</th><th>Measured</th><th>Expected</th><th>Result</th></tr></thead><tbody id="testRows"></tbody></table>
+  <p id="testSummary" class="note"></p>
+  <button id="bTestRun">Run again</button> <button id="bTestClose">Close</button>
+</div></div>
 <div id="main">
   <div id="tools"></div>
   <div id="wrap">
@@ -255,7 +289,17 @@ const Expr = (function () {
    ===================================================================== */
 let scene = newScene();
 function newScene() {
-  return { version: 1, nextId: 1, settings: { pxPerM: 100, grid: 0.1, showGrid: true, snapGrid: true, labelPx: 19 }, objects: [] };
+  return {
+    version: 2, nextId: 1, objects: [],
+    settings: {
+      pxPerM: 100, grid: 0.1, showGrid: true, snapGrid: true, labelPx: 19,
+      g: 9.81,               // m/s^2, points down (-y)
+      dt: 1 / 240,           // fixed physics time step (s)
+      restThreshold: 0.05,   // m/s: slower impacts than this don't bounce (Box2D default is 1 m/s)
+      velIters: 30,          // solver iterations (Box2D default 8) - more = stiffer joints/ropes
+      posIters: 10,
+    },
+  };
 }
 const view = { ox: 60, oy: 500, zoom: 1, get ppm() { return scene.settings.pxPerM * this.zoom; } };
 
@@ -271,7 +315,9 @@ const uid = () => 'o' + (scene.nextId++);
    DEF[type]() gives default properties. META tells the editor which fields
    are points (possibly anchored) and the drawing layer order.
    ===================================================================== */
-const PHYS = () => ({ mass: 1, fixed: false, mu_s: 1.0, mu_k: 1.0, e: 0, labelDx: 0, labelDy: 0 });
+// Physical properties shared by every body. Iover = moment of inertia override ('' = compute from shape).
+// vx, vy, omega are the initial conditions at t = 0.
+const PHYS = () => ({ mass: 1, fixed: false, mu_s: 1.0, mu_k: 1.0, e: 0, collide: true, stick: false, Iover: '', vx: 0, vy: 0, omega: 0, labelDx: 0, labelDy: 0 });
 const DEF = {
   surface: () => ({ kind: 'line', pts: [], side: 1, hatch: true, mu_s: 0.5, mu_k: 0.3, e: 0 }),
   block: () => ({ x: 0, y: 0, w: 1.2, h: 0.7, angle: 0, fill: 'gray', label: 'm', ...PHYS() }),
@@ -279,14 +325,17 @@ const DEF = {
   disk: () => ({ x: 0, y: 0, r: 0.4, angle: 0, fill: 'gray', shape: 'solid disk', centerPin: true, showR: false, rLabel: 'r', label: '', ...PHYS() }),
   rod: () => ({ x: 0, y: 0, len: 1, angle: 0, width: 3, label: '', ...PHYS(), mass: 0.5 }),
   pointmass: () => ({ x: 0, y: 0, style: 'mass', size: 9, label: 'm', ...PHYS(), labelDx: 0.22, labelDy: 0.12 }),
-  pulley: () => ({ x: 0, y: 0, r: 0.17, angle: 0, fill: 'white', mount: 'none', mountAngle: -90, mountLen: 30, label: '', ...PHYS(), fixed: true, mass: 0 }),
-  pin: () => ({ p: { x: 0, y: 0 }, mount: 'none', mountAngle: -90, mountLen: 24, torsionK: 0 }),
-  track: () => ({ a: { x: 0, y: 0 }, b: { x: 1, y: 0 }, width: 12, hatch: false }),
+  // pulley: mass 0 = ideal massless pulley (rope slides, equal tension both sides);
+  //         mass > 0 = real pulley (rope can't slip, pulley spins). fixed = axle fixed in place.
+  pulley: () => ({ x: 0, y: 0, r: 0.17, angle: 0, fill: 'white', mount: 'none', mountAngle: -90, mountLen: 30, shape: 'solid disk', label: '', ...PHYS(), fixed: true, mass: 0 }),
+  pin: () => ({ p: { x: 0, y: 0 }, mount: 'none', mountAngle: -90, mountLen: 24, torsionK: 0, show: true }),
+  weld: () => ({ p: { x: 0, y: 0 }, show: false }),
+  track: () => ({ a: { x: 0, y: 0 }, b: { x: 1, y: 0 }, width: 12, hatch: false, rotate: false }),
   spring: () => ({ a: null, b: null, style: 'zigzag', coils: 8, amp: 8, nonlinear: false, k: 100, k2: 100, k3: 0, restLen: 1, label: 'k', labelSide: 1 }),
   damper: () => ({ a: null, b: null, c: 1, label: 'c', labelSide: 1 }),
   springdamper: () => ({ a: null, b: null, style: 'zigzag', coils: 6, amp: 7, nonlinear: false, k: 100, k2: 100, k3: 0, c: 1, restLen: 1, labelK: 'k', labelC: 'c', swap: false }),
-  actuator: () => ({ a: null, b: null, law: '0', showRL: false, label: '', labelRL: 'R_L', K: 1, RL: 1, labelSide: 1 }),
-  rope: () => ({ a: null, b: null, via: [], label: '' }),
+  actuator: () => ({ a: null, b: null, law: '0', restLen: 1, showRL: false, label: '', labelRL: 'R_L', K: 1, RL: 1, labelSide: 1 }),
+  rope: () => ({ a: null, b: null, via: [], slack: 0, label: '' }),
   force: () => ({ p: null, angle: 0, len: 0.7, at: 'tail', frame: 'world', law: '5', label: 'F' }),
   moment: () => ({ p: null, r: 0.25, start: 200, sweep: -110, law: '1', label: 'M' }),
   line: () => ({ a: null, b: null, dash: 'solid', weight: 1 }),
@@ -313,6 +362,7 @@ const META = {
   actuator: { layer: 3, pts: ['a', 'b'], conn: true, name: 'Actuator' },
   rope: { layer: 4, pts: ['a', 'b'], name: 'Rope' },
   pin: { layer: 5, pts: ['p'], name: 'Pin' },
+  weld: { layer: 5, pts: ['p'], name: 'Weld' },
   force: { layer: 6, pts: ['p'], name: 'Force' },
   moment: { layer: 6, pts: ['p'], name: 'Moment' },
   line: { layer: 7, pts: ['a', 'b'], name: 'Line' },
@@ -357,7 +407,7 @@ function anchorsOf(o) {
       add('q1', L2W(o, -o.len / 4, 0)); add('q3', L2W(o, o.len / 4, 0));
       break;
     case 'pointmass': add('c', { x: o.x, y: o.y }); break;
-    case 'pin': add('c', P(o.p)); break;
+    case 'pin': case 'weld': add('c', P(o.p)); break;
     case 'track': { const a = P(o.a), b = P(o.b); add('a', a); add('b', b); add('m', V.mul(V.add(a, b), 0.5)); break; }
     case 'surface':
       if (o.kind === 'arc') { add('v0', o.pts[0]); add('v1', o.pts[o.pts.length - 1]); }
@@ -372,17 +422,18 @@ function anchorsOf(o) {
 function anchorPos(o, name) { const an = anchorsOf(o).find((a) => a.name === name); return an ? an.p : null; }
 
 // Resolve a point field: anchored points follow their target; free points are fixed in the world.
+// Anchor name '@' means "this spot on the body" with body-local coordinates (lx, ly).
 function P(pt) {
   if (!pt) return { x: 0, y: 0 };
   if (pt.ref) {
     const o = byId(pt.ref);
-    const p = o && anchorPos(o, pt.a);
+    const p = o && (pt.a === '@' ? L2W(o, pt.lx, pt.ly) : anchorPos(o, pt.a));
     if (p) { pt.x = p.x; pt.y = p.y; return p; }   // remember last position as a fallback
   }
   return { x: pt.x, y: pt.y };
 }
 const free = (x, y) => ({ x, y });
-const copyPt = (p) => (p.ref ? { ref: p.ref, a: p.a, x: p.x, y: p.y } : { x: p.x, y: p.y });
+const copyPt = (p) => (p.ref ? { ref: p.ref, a: p.a, x: p.x, y: p.y, ...(p.a === '@' ? { lx: p.lx, ly: p.ly } : {}) } : { x: p.x, y: p.y });
 
 /* =====================================================================
    5. LaTeX LABELS
@@ -674,7 +725,15 @@ const DRAW = {
   },
   pin(o) {
     const c = S(P(o.p));
+    if (!o.show && o.mount !== 'ground') {           // hidden pin: faint marker in the editor, nothing in exports
+      return EXPORT ? '' : `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="6" fill="#fff" fill-opacity="0.01" stroke="#999" stroke-dasharray="2 2"/>`;
+    }
     return (o.mount === 'ground' ? mountS(c, o.mountAngle, o.mountLen) : '') + pinHeadS(c);
+  },
+  weld(o) {
+    if (EXPORT && !o.show) return '';                // textbook diagrams usually don't draw welds
+    const c = S(P(o.p));
+    return `<rect x="${f(c.x - 4.5)}" y="${f(c.y - 4.5)}" width="9" height="9" fill="#000" stroke="#fff" stroke-width="1" transform="rotate(45 ${f(c.x)} ${f(c.y)})"/>`;
   },
   track(o) {
     const A = S(P(o.a)), B = S(P(o.b)), n = V.perp(V.unit(V.sub(B, A))), h = o.width / 2;
@@ -863,7 +922,7 @@ function overlayMarkup() {
     if (!g) continue;
     const bb = g.getBBox();
     s += `<rect x="${f(bb.x - 4)}" y="${f(bb.y - 4)}" width="${f(bb.width + 8)}" height="${f(bb.height + 8)}" fill="none" stroke="var(--sel)" stroke-dasharray="4 3" stroke-width="1"/>`;
-    if (ui.sel.size === 1) for (const h of handlesOf(byId(id))) {
+    if (ui.sel.size === 1 && !run.sim) for (const h of handlesOf(byId(id))) {
       const i = ui.handles.push(h) - 1, c = S(h.pos);
       if (h.key === 'rot') {
         const cc = S(h.center);
@@ -874,6 +933,7 @@ function overlayMarkup() {
       }
     }
   }
+  if (!run.sim) s += initialVelocityMarkup();
   const g = ghostObject();
   if (g) { try { s += `<g opacity="0.45">${DRAW[g.type](g)}</g>`; } catch (e) { /* incomplete ghost */ } }
   if (ui.snap && ui.tool !== 'select') {
@@ -882,6 +942,21 @@ function overlayMarkup() {
       : `<path d="M${f(c.x - 5)} ${f(c.y)}h10M${f(c.x)} ${f(c.y - 5)}v10" stroke="var(--sel)" stroke-width="1"/>`;
   }
   return s + scaleBarMarkup();
+}
+
+// Initial-velocity arrows (editor only, shown at t = 0). Arrow length: 1 m/s is drawn as V0_SCALE meters.
+const V0_SCALE = 0.2;
+function initialVelocityMarkup() {
+  let s = '';
+  for (const o of scene.objects) {
+    if (!META[o.type].body || (!o.vx && !o.vy)) continue;
+    const c = S(o), tip = S({ x: o.x + o.vx * V0_SCALE, y: o.y + o.vy * V0_SCALE });
+    const dir = V.unit(V.sub(tip, c));
+    s += `<path d="M${f(c.x)} ${f(c.y)}L${f(tip.x - dir.x * 8)} ${f(tip.y - dir.y * 8)}" stroke="var(--sel)" stroke-width="2"/>`;
+    s += `<path d="${pathD([tip, V.add(V.sub(tip, V.mul(dir, 10)), V.mul(V.perp(dir), 4)), V.sub(V.sub(tip, V.mul(dir, 10)), V.mul(V.perp(dir), 4))], true)}" fill="var(--sel)"/>`;
+    s += `<text x="${f(tip.x + dir.x * 8)}" y="${f(tip.y + dir.y * 8 - 4)}" font-size="11" fill="var(--sel)" font-family="system-ui">v₀ = ${Math.hypot(o.vx, o.vy).toFixed(2)} m/s</text>`;
+  }
+  return s;
 }
 
 // Draggable handles for the selected object: endpoints, vertices, rotation.
@@ -996,6 +1071,7 @@ const TOOLS = {
   pulley: { group: 'Bodies', name: 'Pulley', mode: 'one', make: (p) => mk('pulley', xy(p[0])) },
   pin: { group: 'Joints', name: 'Pin', key: 'p', mode: 'one', make: (p) => mk('pin', { p: copyPt(p[0]) }) },
   groundpin: { group: 'Joints', name: 'Ground pin', mode: 'one', make: (p) => mk('pin', { p: copyPt(p[0]), mount: 'ground' }) },
+  weld: { group: 'Joints', name: 'Weld', mode: 'one', hint: 'Click a point where two bodies touch or overlap: they become one rigid piece. (Not drawn in exports unless you tick "Show in export".)', make: (p) => mk('weld', { p: copyPt(p[0]) }) },
   track: { group: 'Joints', name: 'Slider / track', mode: 'two', make: (p) => mk('track', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
   spring: { group: 'Elements', name: 'Spring', key: 's', mode: 'two', make: conn('spring') },
   damper: { group: 'Elements', name: 'Damper', mode: 'two', make: conn('damper') },
@@ -1004,6 +1080,7 @@ const TOOLS = {
   rope: { group: 'Elements', name: 'Rope', key: 'r', mode: 'rope', hint: 'Click start; click inside pulleys/disks to wrap (the side you click is the side the rope passes); click the end point. Alt-click a pulley to attach instead. Esc cancels.' },
   force: { group: 'Loads', name: 'Force', key: 'f', mode: 'two', hint: 'Click the point of application, then the arrow direction.', make: (p) => { const d = V.sub(p[1], p[0]); return mk('force', { p: copyPt(p[0]), angle: toDeg(Math.atan2(d.y, d.x)), len: Math.max(0.1, V.len(d)) }); } },
   moment: { group: 'Loads', name: 'Moment', mode: 'one', make: (p) => mk('moment', { p: copyPt(p[0]) }) },
+  velocity: { group: 'Loads', name: 'Initial velocity', mode: 'drag', hint: 'Drag from a body to set its velocity at t = 0 (1 m/s is drawn 0.2 m long; Shift = 15° steps). Type ω₀ in the panel.' },
   line: { group: 'Annotations', name: 'Line', key: 'l', mode: 'two', make: (p) => mk('line', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
   dim: { group: 'Annotations', name: 'Dimension', mode: 'two', make: (p) => mk('dim', { a: copyPt(p[0]), b: copyPt(p[1]) }) },
   angle: { group: 'Annotations', name: 'Angle arc', mode: 'three', hint: 'Click the vertex, a point on the reference line, then the target point.', make: (p) => p.length < 3 ? mk('line', { a: copyPt(p[0]), b: copyPt(p[1]), dash: 'dashdot' }) : mk('angle', { v: copyPt(p[0]), r: copyPt(p[1]), t: copyPt(p[2]) }) },
@@ -1016,6 +1093,7 @@ const TOOLS = {
 const NEED = { one: 1, two: 2, three: 3 };
 
 function setTool(t) {
+  if (run.sim && t !== 'select') { msg('Reset the simulation (t = 0) to edit.'); t = 'select'; }
   ui.tool = t; ui.pending = []; ui.rope = null;
   document.querySelectorAll('#tools button').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
   const T = TOOLS[t];
@@ -1030,7 +1108,7 @@ function updateExactBox() {
 // Ghost preview of the object being created, following the mouse.
 function ghostObject() {
   const T = TOOLS[ui.tool];
-  if (!ui.snap || T.mode === 'select') return null;
+  if (!ui.snap || T.mode === 'select' || T.mode === 'drag') return null;
   if (T.mode === 'rope') {
     if (!ui.rope) return null;
     return { ...mk('rope', { a: ui.rope.a, b: ui.snap, via: ui.rope.via }) };
@@ -1128,16 +1206,29 @@ function initPointer() {
     if (e.button !== 0) return;
     if (ui.tool === 'select') {
       const hEl = e.target.closest('[data-h]');
-      if (hEl) { ui.drag = { kind: 'handle', h: ui.handles[+hEl.dataset.h], moved: false }; svg.setPointerCapture(e.pointerId); return; }
+      if (hEl && !run.sim) { ui.drag = { kind: 'handle', h: ui.handles[+hEl.dataset.h], moved: false }; svg.setPointerCapture(e.pointerId); return; }
       const g = e.target.closest('[data-id]');
       if (g) {
         const id = g.dataset.id;
         if (e.shiftKey) { ui.sel.has(id) ? ui.sel.delete(id) : ui.sel.add(id); }
         else if (!ui.sel.has(id)) ui.sel = new Set([id]);
-        ui.drag = { kind: 'move', last: snapGridOnly(w), moved: false };
-        svg.setPointerCapture(e.pointerId);
+        if (!run.sim) {                                // while simulating you can select but not move
+          ui.drag = { kind: 'move', last: snapGridOnly(w), moved: false };
+          svg.setPointerCapture(e.pointerId);
+        }
       } else ui.sel.clear();
       render(); showPanel(); return;
+    }
+    if (run.sim) { msg('Reset the simulation (t = 0) to edit.'); return; }
+    if (TOOLS[ui.tool].mode === 'drag') {              // initial-velocity tool: start dragging from a body
+      const g = e.target.closest('[data-id]');
+      const o = g && byId(g.dataset.id);
+      if (o && META[o.type].body) {
+        ui.sel = new Set([o.id]);
+        ui.drag = { kind: 'vel', id: o.id, moved: false };
+        svg.setPointerCapture(e.pointerId);
+      } else msg('Start the drag on a body.');
+      return;
     }
     toolClick(e, w);
   });
@@ -1157,7 +1248,14 @@ function initPointer() {
       const p = d.h.key === 'rot' ? w : snapPoint(w, e, new Set([o.id]));
       setHandle(o, d.h.key, p, e); d.moved = true; render(); return;
     }
-    ui.snap = ui.tool === 'select' ? null : snapPoint(w, e);
+    if (d && d.kind === 'vel') {                       // v0 = (drag vector) / V0_SCALE
+      const o = byId(d.id);
+      let v = V.mul(V.sub(w, o), 1 / V0_SCALE);
+      if (e.shiftKey) { const a = toRad(Math.round(toDeg(Math.atan2(v.y, v.x)) / 15) * 15); v = V.mul(V.dir(a), V.len(v)); }
+      o.vx = Math.round(v.x * 100) / 100; o.vy = Math.round(v.y * 100) / 100;
+      d.moved = true; render(); return;
+    }
+    ui.snap = (ui.tool === 'select' || TOOLS[ui.tool].mode === 'drag') ? null : snapPoint(w, e);
     if (ui.tool !== 'select') render();
   });
   svg.addEventListener('pointerup', () => {
@@ -1184,6 +1282,9 @@ function initKeys() {
     if (e.target === $('exact') && e.key === 'Enter') { exactEntry(); return; }
     if (typing) return;
     const ctrl = e.ctrlKey || e.metaKey;
+    // While a simulation exists (t > 0), the scene is read-only: Reset first.
+    const editKey = (ctrl && 'zyvd'.includes(e.key.toLowerCase())) || e.key === 'Delete' || e.key === 'Backspace' || (e.key === 'r' && ui.tool === 'select');
+    if (run.sim && editKey) { msg('Reset the simulation (t = 0) to edit.'); return; }
     if (ctrl && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (ctrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
     if (ctrl && e.key.toLowerCase() === 'c') { copySel(); return; }
@@ -1229,13 +1330,22 @@ const Fd = {
   bool: (k, l) => ({ t: 'bool', k, l }),
   sel: (k, l, o) => ({ t: 'sel', k, l, o }),
   tex: (k, l) => ({ t: 'tex', k, l }),
+  text: (k, l) => ({ t: 'text', k, l }),
   expr: (k, l, vars) => ({ t: 'expr', k, l, vars }),
   head: (l) => ({ t: 'head', l }),
   info: (l, fn) => ({ t: 'info', l, fn }),
   btn: (l, fn) => ({ t: 'btn', l, fn }),
 };
-const PHYS_FIELDS = [Fd.head('Physics (used from Phase 2)'), Fd.num('mass', 'Mass m (kg)', 0.1, 0), Fd.bool('fixed', 'Fixed (immovable)'),
-  Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1)];
+const fmtI = (o) => { const I = inertiaOf(o); return (isFinite(I) ? I.toPrecision(4) : '—') + ' kg·m²' + (parseFloat(o.Iover) > 0 ? ' (override)' : ''); };
+const CONTACT_FIELDS = [Fd.num('mu_s', 'μ_s (static)', 0.05, 0), Fd.num('mu_k', 'μ_k (kinetic)', 0.05, 0), Fd.num('e', 'Restitution e', 0.05, 0, 1),
+  Fd.bool('collide', 'Collides with others'), Fd.bool('stick', 'Stick on contact (perfectly inelastic)')];
+const INIT_FIELDS = [Fd.head('Initial conditions (t = 0)'), Fd.num('vx', 'v₀ₓ (m/s)', 0.1), Fd.num('vy', 'v₀ᵧ (m/s)', 0.1), Fd.num('omega', 'ω₀ (rad/s, + = CCW)', 0.1)];
+const PHYS_FIELDS = [Fd.head('Physics'), Fd.num('mass', 'Mass m (kg)', 0.1, 0), Fd.bool('fixed', 'Fixed (immovable)'),
+  Fd.info('I about center', fmtI), Fd.text('Iover', 'I override (kg·m², blank = auto)'), ...CONTACT_FIELDS, ...INIT_FIELDS];
+const PULLEY_PHYS = [Fd.head('Physics'), Fd.num('mass', 'Mass (kg, 0 = ideal)', 0.1, 0), Fd.bool('fixed', 'Axle fixed in place'),
+  Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop']), Fd.info('I about center', fmtI), Fd.text('Iover', 'I override (kg·m², blank = auto)'),
+  Fd.info('Rope on pulley', (o) => (o.mass > 0 ? 'no slip: pulley spins, tensions differ' : 'ideal: rope slides, same tension both sides')),
+  ...CONTACT_FIELDS, Fd.num('omega', 'ω₀ (rad/s, + = CCW)', 0.1)];
 const LABEL_FIELDS = [Fd.head('Label'), Fd.tex('label', 'Label (TeX)'), Fd.num('labelDx', 'Label offset x (m)', 0.05), Fd.num('labelDy', 'Label offset y (m)', 0.05)];
 const POS = [Fd.num('x', 'x (m)', 0.05), Fd.num('y', 'y (m)', 0.05)];
 const curLen = (o) => V.dist(P(o.a), P(o.b));
@@ -1247,19 +1357,26 @@ const FIELDS = {
   block: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), ...PHYS_FIELDS, ...LABEL_FIELDS],
   cart: [...POS, Fd.num('w', 'Width (m)', 0.05, 0.01), Fd.num('h', 'Height (m)', 0.05, 0.01), Fd.num('wheelR', 'Wheel radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.bool('rolling', 'Real rolling wheels (Phase 4)'), ...PHYS_FIELDS, ...LABEL_FIELDS],
   disk: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop', 'sphere']), Fd.bool('centerPin', 'Center pin'), Fd.bool('showR', 'Radius arrow'), Fd.tex('rLabel', 'Radius label'), ...PHYS_FIELDS, ...LABEL_FIELDS],
-  pulley: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.sel('fill', 'Fill', ['white', 'gray', 'none']), Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), ...PHYS_FIELDS, ...LABEL_FIELDS],
-  rod: [...POS, Fd.num('len', 'Length (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.num('width', 'Line weight (px)', 0.5, 0.5), ...PHYS_FIELDS, ...LABEL_FIELDS],
+  pulley: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.sel('fill', 'Fill', ['white', 'gray', 'none']), Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), ...PULLEY_PHYS, ...LABEL_FIELDS],
+  rod: [...POS, Fd.num('len', 'Length (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.num('width', 'Line weight (px)', 0.5, 0.5),
+    Fd.info('Mass 0 means', () => 'massless rigid rod: keeps its two ends a fixed distance apart'), ...PHYS_FIELDS, ...LABEL_FIELDS],
   pointmass: [...POS, Fd.sel('style', 'Style', [['mass', 'point mass (filled)'], ['bob', 'pendulum bob']]), Fd.num('size', 'Dot radius (px)', 1, 2), ...PHYS_FIELDS, ...LABEL_FIELDS],
-  pin: [Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0)],
-  track: [Fd.num('width', 'Slot width (px)', 1, 2), Fd.bool('hatch', 'Hatching')],
+  pin: [Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0), Fd.bool('show', 'Draw pin symbol'),
+    Fd.info('Joins', () => 'every body at this point (ground too if mounted, or if only one body is here)')],
+  weld: [Fd.bool('show', 'Show in export'), Fd.info('Joins', () => 'every body at this point rigidly (to the ground if only one body)')],
+  track: [Fd.num('width', 'Slot width (px)', 1, 2), Fd.bool('hatch', 'Hatching'), Fd.bool('rotate', 'Slider may rotate (collar)'),
+    Fd.info('Slides', () => 'any body whose center is on the track; the ends are stops')],
   spring: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
     Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
   damper: [Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.tex('label', 'Label (TeX)'), Fd.sel('labelSide', 'Label side', [[1, 'side A'], [-1, 'side B']])],
   springdamper: [Fd.num('k', 'k (N/m)', 1, 0), Fd.num('k2', 'k₂ (N/m) nonlinear', 1), Fd.num('k3', 'k₃ (N/m³) nonlinear', 1), Fd.num('c', 'c (N·s/m)', 0.1, 0), Fd.num('restLen', 'Rest length (m)', 0.01, 0), restBtn,
     Fd.info('Current length', (o) => curLen(o).toFixed(3) + ' m'), Fd.head('Look'), ...SPRING_LOOK, Fd.bool('swap', 'Swap branches'), Fd.tex('labelK', 'Spring label'), Fd.tex('labelC', 'Damper label')],
-  actuator: [Fd.expr('law', 'Force law F(t, d, v) (N)', ['t', 'd', 'v']), Fd.bool('showRL', 'Show R_L in parallel'), Fd.num('K', 'Motor constant K', 0.1), Fd.num('RL', 'R_L (Ω)', 0.1, 0.001),
-    Fd.info('Equivalent damping K²/R_L', (o) => (o.K * o.K / o.RL).toFixed(3) + ' N·s/m'), Fd.tex('label', 'Label'), Fd.tex('labelRL', 'R_L label')],
-  rope: [Fd.info('Length along path', (o) => ropeGeom(o).length.toFixed(3) + ' m'), Fd.info('Wraps', (o) => o.via.length + ' pulley(s)'), Fd.btn('Reverse wrap directions', (o) => o.via.forEach((v) => { v.s = -v.s; })), Fd.tex('label', 'Label')],
+  actuator: [Fd.expr('law', 'Force law F(t, d, v) (N)', ['t', 'd', 'v']), Fd.info('Sign', () => 'F > 0 pushes the ends apart; d = L − L₀, v = dL/dt'),
+    Fd.num('restLen', 'Reference length L₀ (m)', 0.01, 0), restBtn, Fd.bool('showRL', 'Show R_L in parallel'), Fd.num('K', 'Motor constant K', 0.1), Fd.num('RL', 'R_L (Ω)', 0.1, 0.001),
+    Fd.info('Equivalent damping K²/R_L', (o) => (o.K * o.K / o.RL).toFixed(3) + ' N·s/m'),
+    Fd.btn('Use as EM damper: F = −(K²/R_L)·v', (o) => { o.law = `-${+(o.K * o.K / o.RL).toPrecision(6)}*v`; }), Fd.tex('label', 'Label'), Fd.tex('labelRL', 'R_L label')],
+  rope: [Fd.info('Length along path', (o) => ropeGeom(o).length.toFixed(3) + ' m'), Fd.num('slack', 'Extra (slack) length (m)', 0.01, 0), Fd.info('Wraps', (o) => o.via.length + ' pulley(s)'),
+    Fd.btn('Reverse wrap directions', (o) => o.via.forEach((v) => { v.s = -v.s; })), Fd.tex('label', 'Label')],
   force: [Fd.expr('law', 'Magnitude F(t) (N)', ['t']), Fd.degv('angle', 'Direction (°)'), Fd.sel('frame', 'Direction is fixed in', ['world', 'body']), Fd.sel('at', 'Point is the arrow’s', ['tail', 'tip']), Fd.num('len', 'Drawn length (m)', 0.05, 0.05), Fd.tex('label', 'Label')],
   moment: [Fd.expr('law', 'M(t) (N·m, + = CCW)', ['t']), Fd.num('r', 'Arc radius (m)', 0.01, 0.02), Fd.degv('start', 'Start angle (°)'), Fd.degv('sweep', 'Sweep (°, sign = direction)'), Fd.tex('label', 'Label')],
   line: [Fd.sel('dash', 'Style', ['solid', 'dashed', 'dashdot']), Fd.num('weight', 'Weight (px)', 0.5, 0.5)],
@@ -1274,9 +1391,15 @@ const FIELDS = {
 const QUICK = ['\\theta', '\\varphi', '\\omega', '\\alpha', '\\mu', '\\ell', '\\Delta', '\\vec{e}_1', '_{}', '^{}', '\\dot{x}', '\\neq'];
 let lastTexInput = null;
 
+// While a simulation exists the panel is read-only (the scene is restored exactly on Reset).
+function lockPanel(box) {
+  if (!run.sim) return;
+  box.querySelectorAll('input, select, button').forEach((el) => { el.disabled = true; });
+  box.insertAdjacentHTML('afterbegin', '<div class="locknote">Simulation in progress: press <b>Reset</b> to edit.</div>');
+}
 function showPanel() {
   const box = $('props');
-  if (ui.sel.size !== 1) { box.innerHTML = ui.sel.size > 1 ? `<h3>${ui.sel.size} objects selected</h3><p class="note">Drag to move them together. Ctrl+C / Ctrl+V to copy.</p>` + settingsHTML() : settingsHTML(); bindSettings(); return; }
+  if (ui.sel.size !== 1) { box.innerHTML = ui.sel.size > 1 ? `<h3>${ui.sel.size} objects selected</h3><p class="note">Drag to move them together. Ctrl+C / Ctrl+V to copy.</p>` + settingsHTML() : settingsHTML(); bindSettings(); lockPanel(box); return; }
   const o = byId([...ui.sel][0]);
   let h = `<h3>${META[o.type].name} <span class="note">${o.id}</span></h3>`;
   const fields = FIELDS[o.type] || [];
@@ -1290,7 +1413,7 @@ function showPanel() {
     if (fd.t === 'deg') input = `<input type="number" data-i="${i}" step="1" value="${+toDeg(v).toFixed(2)}">`;
     if (fd.t === 'bool') input = `<input type="checkbox" data-i="${i}" ${v ? 'checked' : ''}>`;
     if (fd.t === 'sel') input = `<select data-i="${i}">${fd.o.map((op) => { const [val, txt] = Array.isArray(op) ? op : [op, op]; return `<option value="${val}" ${String(val) === String(v) ? 'selected' : ''}>${txt}</option>`; }).join('')}</select>`;
-    if (fd.t === 'tex' || fd.t === 'expr') input = `<input type="text" data-i="${i}" value="${esc(v)}">`;
+    if (fd.t === 'tex' || fd.t === 'expr' || fd.t === 'text') input = `<input type="text" data-i="${i}" value="${esc(v ?? '')}">`;
     h += `<div class="row"><label>${fd.l}</label>${input}</div>`;
     if (fd.t === 'tex') h += `<div class="texprev" data-prev="${i}"></div>`;
     if (fd.t === 'expr') h += `<div class="err" data-err="${i}"></div>`;
@@ -1314,6 +1437,7 @@ function showPanel() {
     el.focus(); el.selectionStart = el.selectionEnd = s0 + q.length - (q.endsWith('{}') ? 1 : 0);
     el.dispatchEvent(new Event('change'));
   });
+  lockPanel(box);
 }
 function applyField(o, fd, el) {
   let v;
@@ -1381,13 +1505,13 @@ function commit() {
   try { localStorage.setItem('mechSandbox.autosave', s); } catch (e) { /* storage blocked: fine */ }
 }
 function restore(s) { scene = JSON.parse(s); ui.sel = new Set([...ui.sel].filter((id) => byId(id))); render(); showPanel(); }
-function undo() { if (hist.i > 0) restore(hist.stack[--hist.i]); }
-function redo() { if (hist.i < hist.stack.length - 1) restore(hist.stack[++hist.i]); }
+function undo() { if (run.sim) return msg('Reset the simulation (t = 0) to edit.'); if (hist.i > 0) restore(hist.stack[--hist.i]); }
+function redo() { if (run.sim) return msg('Reset the simulation (t = 0) to edit.'); if (hist.i < hist.stack.length - 1) restore(hist.stack[++hist.i]); }
 
 let clipboard = null;
 function copySel() { if (ui.sel.size) { clipboard = JSON.stringify(scene.objects.filter((o) => ui.sel.has(o.id))); msg(ui.sel.size + ' object(s) copied'); } }
 function paste() {
-  if (!clipboard) return;
+  if (!clipboard || run.sim) return;
   const objs = JSON.parse(clipboard), map = {};
   for (const o of objs) { map[o.id] = uid(); }
   const d = { x: 0.2, y: -0.2 };
@@ -1403,7 +1527,7 @@ function paste() {
   commit(); render(); showPanel();
 }
 function deleteSel() {
-  if (!ui.sel.size) return;
+  if (!ui.sel.size || run.sim) return;
   for (const o of scene.objects) {          // anything attached to a deleted object stays where it is
     for (const k of META[o.type].pts || []) { const p = o[k]; if (p && p.ref && ui.sel.has(p.ref)) { const q = P(p); o[k] = { x: q.x, y: q.y }; } }
     if (o.via) o.via = o.via.filter((v) => !ui.sel.has(v.id));
