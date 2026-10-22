@@ -1,0 +1,49 @@
+# Publishes the sandbox as a website with GitHub Pages: the same offline bundle the Windows app uses
+# (desktop/prepare.js), so Planck and MathJax are served from this site instead of a CDN.
+# One-time setup: repo Settings -> Pages -> Source: "GitHub Actions". A custom domain is set on that page too.
+name: Deploy website
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - mechanics-sandbox.html        # redeploys whenever the app changes (or run it from the Actions tab)
+
+permissions:
+  contents: read
+  pages: write             # publish to GitHub Pages
+  id-token: write          # proves the deployment comes from this workflow
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build the site
+        run: |
+          mkdir -p "$RUNNER_TEMP/vendor" && cd "$RUNNER_TEMP/vendor"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund planck@1.5.0 mathjax@3.2.2
+          cd "$GITHUB_WORKSPACE"
+          VENDOR_NODE_MODULES="$RUNNER_TEMP/vendor/node_modules" node desktop/prepare.js
+          touch desktop/app/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: desktop/app
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

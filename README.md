@@ -10,6 +10,7 @@ An interactive 2D mechanics sandbox for AP Physics C: Mechanics. You draw system
 
 Windows: grab the `.exe` from the [Releases page](../../releases). The **portable** one runs without installing; the **setup** one installs with shortcuts. Both work offline.
 Mac, Chromebook or Linux: download `mechanics-sandbox.html` from the same page and open it in Chrome or Edge.
+Or use it online: the **Deploy website** workflow (`.github/workflows/pages.yml`) publishes it with GitHub Pages every time `mechanics-sandbox.html` changes.
 
 The Windows app is built by GitHub Actions (`.github/workflows/release.yml`) from the `desktop/` folder: Actions tab → **Build Windows app** → **Run workflow**, type a version like `1.0.0`. Building locally on Windows: `cd desktop && npm ci && npm run dist`.
 

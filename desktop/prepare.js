@@ -6,7 +6,9 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const app = path.join(__dirname, 'app');
 const vendor = path.join(app, 'vendor');
-const nm = path.join(__dirname, 'node_modules');
+// Where planck and mathjax are installed. The website build installs just those two somewhere else
+// (VENDOR_NODE_MODULES) instead of the whole desktop toolchain.
+const nm = process.env.VENDOR_NODE_MODULES || path.join(__dirname, 'node_modules');
 
 // The local copies must be exactly the versions the page asks the CDN for.
 const LIBS = [
