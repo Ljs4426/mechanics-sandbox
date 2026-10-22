@@ -5,7 +5,7 @@
 <title>Mechanics Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
-  MECHANICS SANDBOX - Phase 2 (editor + core physics)
+  MECHANICS SANDBOX - Phase 3 (editor + core physics + AP analysis tools)
   ---------------------------------------------------
   One self-contained file. Sections in the <script> below:
     1. Utilities (vector math)
@@ -27,7 +27,10 @@
    17. Physics: custom rope constraint (ropes over pulleys)
    18. Simulation controls (play / pause / step / reset, fixed time step)
    19. Built-in tests
-   20. Startup
+   20. Analysis: data recorder, live readouts, free-body diagram
+   21. Analysis: overlays (v, a, p, omega, trails, CM), ruler, protractor
+   22. Graphs and CSV export
+   23. Startup
   Coordinates: the scene is stored in METERS with +y UP (textbook convention).
   Only the renderer converts to screen pixels (where SVG's +y is DOWN).
 -->
@@ -80,6 +83,31 @@
   #testBox table { border-collapse: collapse; width: 100%; margin: 8px 0; }
   #testBox td, #testBox th { border-bottom: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
   .pass { color: #070; font-weight: 600; } .fail { color: #b00; font-weight: 600; }
+  /* analysis tools (Phase 3) */
+  #tools label.chk { display: block; font-size: 12px; padding: 1px 2px; cursor: pointer; }
+  #tools .small { font-size: 12px; margin-top: 4px; border-color: #aaa; background: #fff; text-align: center; }
+  table.ro { border-collapse: collapse; width: 100%; font-size: 12px; margin-bottom: 6px; }
+  table.ro th, table.ro td { text-align: left; vertical-align: top; padding: 2px 3px; border-bottom: 1px solid #e4e4e4; }
+  table.ro th { font-weight: 500; color: #444; width: 42%; }
+  table.ro .mag { color: #666; }
+  table.forces td:first-child { width: 46%; }
+  table.forces tr.off td { color: #999; }
+  .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  details.lockd { margin-top: 8px; } details.lockd summary { cursor: pointer; color: #555; font-size: 12px; }
+  #fbdBox { position: absolute; right: 10px; bottom: 10px; width: 352px; background: #fff; border: 1px solid #999; box-shadow: 0 2px 8px rgba(0,0,0,0.12); padding: 6px; font-size: 12px; }
+  #fbdBox[hidden] { display: none; }
+  #fbdBox .fbdHead { font-weight: 600; margin-bottom: 2px; display: flex; gap: 6px; align-items: center; }
+  #fbdBox .fbdHead .note { flex: 1; } #fbdBox .fbdHead select, #fbdBox .fbdHead button { font-size: 11px; padding: 0 4px; }
+  .roh { font-weight: 600; margin: 4px 0; font-size: 12px; }
+  #fbdSvg { display: block; width: 340px; height: 290px; overflow: visible; }
+  #dock { height: 260px; border-top: 1px solid var(--line); background: var(--ui); display: flex; flex-direction: column; }
+  #dock[hidden] { display: none; }
+  #dockBar { display: flex; gap: 8px; align-items: center; padding: 4px 8px; }
+  #graphs { flex: 1; display: flex; gap: 8px; overflow-x: auto; padding: 0 8px 6px; min-height: 0; }
+  .gcard { flex: 0 0 440px; background: #fff; border: 1px solid #ccc; padding: 4px; display: flex; flex-direction: column; }
+  .ghead { display: flex; gap: 3px; } .ghead select { flex: 1; min-width: 0; font-size: 12px; padding: 1px 2px; } .ghead select[hidden] { display: none; }
+  .gcv { flex: 1; width: 100%; min-height: 0; cursor: crosshair; }
+  .ginfo { min-height: 16px; margin: 2px 0 0; }
 </style>
 
 <!-- MathJax configuration must exist BEFORE the MathJax script loads -->
@@ -147,8 +175,18 @@
       <g id="sceneG"></g>
       <g id="overlay"></g>
     </svg>
+    <div id="fbdBox" hidden><div class="fbdHead">Free-body diagram <span id="fbdName" class="note"></span>
+      <select id="fbdStyle" class="ana" title="Dot = AP particle diagram; extended = forces drawn where they act (needed for torque)">
+        <option value="auto">auto</option><option value="dot">dot (particle)</option><option value="ext">extended body</option></select>
+      <button id="fbdClose" class="ana" title="Hide">×</button></div>
+      <svg id="fbdSvg" xmlns="http://www.w3.org/2000/svg"></svg><div id="fbdCheck"></div></div>
   </div>
   <div id="props"></div>
+</div>
+<div id="dock" hidden>
+  <div id="dockBar"><b>Graphs</b> <button id="gAdd">+ Add graph</button> <button id="gCsv">Export CSV (all data)</button>
+    <span class="note">Hover to read values. Drag across a graph to pick a time window; double-click to clear.</span></div>
+  <div id="graphs"></div>
 </div>
 <div id="status"><span id="stPos">x = 0.00 m, y = 0.00 m</span><span id="stHint"></span><span id="stMsg"></span></div>
 
@@ -948,6 +986,7 @@ function overlayMarkup() {
     }
   }
   if (!run.sim) s += initialVelocityMarkup();
+  s += analysisMarkup();
   const g = ghostObject();
   if (g) { try { s += `<g opacity="0.45">${DRAW[g.type](g)}</g>`; } catch (e) { /* incomplete ghost */ } }
   if (ui.snap && ui.tool !== 'select') {
@@ -1103,13 +1142,20 @@ const TOOLS = {
   gravity: { group: 'Annotations', name: 'Gravity arrow', mode: 'one', make: (p) => mk('gravity', { p: xy(p[0]) }) },
   leader: { group: 'Annotations', name: 'Leader + label', mode: 'two', hint: 'Click where the label goes, then the part it points to.', make: (p) => mk('leader', { a: xy(p[0]), b: copyPt(p[1]) }) },
   text: { group: 'Annotations', name: 'Label', key: 't', mode: 'one', make: (p) => mk('text', { p: copyPt(p[0]) }) },
+  // Analysis tools (Phase 3): not part of the drawing, and they work while the simulation runs.
+  ruler: { group: 'Analysis', name: 'Ruler', mode: 'two', ana: true, hint: 'Click two points. Snapped ends follow moving parts. Not exported. Clear them in the Show list.',
+    make: (p) => ana.measures.push({ type: 'ruler', a: copyPt(p[0]), b: copyPt(p[1]) }) },
+  protractor: { group: 'Analysis', name: 'Protractor', mode: 'three', ana: true, hint: 'Click the vertex, then a point on each arm. Snapped points follow moving parts.',
+    make: (p) => ana.measures.push({ type: 'protractor', v: copyPt(p[0]), a: copyPt(p[1]), b: copyPt(p[2]) }) },
+  pickO: { group: 'Analysis', name: 'Pick point O', mode: 'one', ana: true, hint: 'Click the point O used for angular momentum L and net torque τ.',
+    make: (p) => { ana.O = { x: p[0].x, y: p[0].y }; ana.Oset = true; } },
 };
 const NEED = { one: 1, two: 2, three: 3 };
 
 function setTool(t) {
-  if (run.sim && t !== 'select') { msg('Reset the simulation (t = 0) to edit.'); t = 'select'; }
+  if (run.sim && t !== 'select' && !TOOLS[t].ana) { msg('Reset the simulation (t = 0) to edit.'); t = 'select'; }
   ui.tool = t; ui.pending = []; ui.rope = null;
-  document.querySelectorAll('#tools button').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
+  document.querySelectorAll('#tools button[data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
   const T = TOOLS[t];
   $('stHint').textContent = T.hint || (T.mode === 'one' ? 'Click to place.' : T.mode === 'two' ? 'Click two points (Shift = 15° steps; type length, angle in the top bar).' : T.mode === 'poly' ? 'Click points; double-click or Enter to finish.' : '');
   updateExactBox();
@@ -1122,7 +1168,7 @@ function updateExactBox() {
 // Ghost preview of the object being created, following the mouse.
 function ghostObject() {
   const T = TOOLS[ui.tool];
-  if (!ui.snap || T.mode === 'select' || T.mode === 'drag') return null;
+  if (!ui.snap || T.mode === 'select' || T.mode === 'drag' || T.ana) return null;
   if (T.mode === 'rope') {
     if (!ui.rope) return null;
     return { ...mk('rope', { a: ui.rope.a, b: ui.snap, via: ui.rope.via }) };
@@ -1151,6 +1197,7 @@ function toolClick(e, w) {
   if (T.mode === 'rope') return ropeClick(e, p, w);
   ui.pending.push(p);
   if (T.mode !== 'poly' && ui.pending.length >= NEED[T.mode]) {
+    if (T.ana) { T.make(ui.pending); ui.pending = []; saveAna(); updateExactBox(); render(); refreshAnalysis(); return; }
     const o = T.make(ui.pending);
     ui.pending = [];
     addObject(o);
@@ -1189,7 +1236,9 @@ function exactEntry() {
   $('exact').value = '';
   ui.pending.push(p);
   const T = TOOLS[ui.tool];
-  if (T.mode !== 'poly' && ui.pending.length >= NEED[T.mode]) { const o = T.make(ui.pending); ui.pending = []; addObject(o); }
+  if (T.mode !== 'poly' && ui.pending.length >= NEED[T.mode]) {
+    if (T.ana) { T.make(ui.pending); ui.pending = []; saveAna(); } else { const o = T.make(ui.pending); ui.pending = []; addObject(o); }
+  }
   updateExactBox(); render();
 }
 
@@ -1233,7 +1282,7 @@ function initPointer() {
       } else ui.sel.clear();
       render(); showPanel(); return;
     }
-    if (run.sim) { msg('Reset the simulation (t = 0) to edit.'); return; }
+    if (run.sim && !TOOLS[ui.tool].ana) { msg('Reset the simulation (t = 0) to edit.'); return; }
     if (TOOLS[ui.tool].mode === 'drag') {              // initial-velocity tool: start dragging from a body
       const g = e.target.closest('[data-id]');
       const o = g && byId(g.dataset.id);
@@ -1408,12 +1457,16 @@ let lastTexInput = null;
 // While a simulation exists the panel is read-only (the scene is restored exactly on Reset).
 function lockPanel(box) {
   if (!run.sim) return;
-  box.querySelectorAll('input, select, button').forEach((el) => { el.disabled = true; });
+  box.querySelectorAll('input, select, button').forEach((el) => { if (!el.classList.contains('ana')) el.disabled = true; });
   box.insertAdjacentHTML('afterbegin', '<div class="locknote">Simulation in progress: press <b>Reset</b> to edit.</div>');
 }
 function showPanel() {
   const box = $('props');
-  if (ui.sel.size !== 1) { box.innerHTML = ui.sel.size > 1 ? `<h3>${ui.sel.size} objects selected</h3><p class="note">Drag to move them together. Ctrl+C / Ctrl+V to copy.</p>` + settingsHTML() : settingsHTML(); bindSettings(); lockPanel(box); return; }
+  const ro = run.sim ? '<div id="ro"></div>' : '';
+  if (ui.sel.size !== 1) {
+    box.innerHTML = ro + (ui.sel.size > 1 ? `<h3>${ui.sel.size} objects selected</h3><p class="note">Drag to move them together. Ctrl+C / Ctrl+V to copy.</p>` : '') + settingsHTML();
+    bindSettings(); lockPanel(box); refreshAnalysis(); return;
+  }
   const o = byId([...ui.sel][0]);
   let h = `<h3>${META[o.type].name} <span class="note">${o.id}</span></h3>`;
   const fields = FIELDS[o.type] || [];
@@ -1434,7 +1487,8 @@ function showPanel() {
   });
   if (fields.some((fd) => fd.t === 'tex')) h += `<div class="quick">${QUICK.map((q) => `<button data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div><p class="note">Quick-insert goes into the last label box you clicked.</p>`;
   if (META[o.type].pts) h += `<p class="note">Square handles: drag onto an anchor to attach (blue circle), or anywhere to fix to the ground.</p>`;
-  box.innerHTML = h;
+  // While simulating, live readouts come first and the (locked) properties fold away.
+  box.innerHTML = run.sim ? `${ro}<details class="lockd"><summary>${META[o.type].name} properties (locked while simulating)</summary>${h}</details>` : h;
   box.querySelectorAll('[data-prev]').forEach((el) => updateTexPreview(el, o[fields[+el.dataset.prev].k]));
   box.querySelectorAll('[data-err]').forEach((el) => checkExpr(el, fields[+el.dataset.err], o));
   box.querySelectorAll('[data-i]').forEach((el) => {
@@ -1452,6 +1506,7 @@ function showPanel() {
     el.dispatchEvent(new Event('change'));
   });
   lockPanel(box);
+  refreshAnalysis();
 }
 function applyField(o, fd, el) {
   let v;
@@ -1493,6 +1548,12 @@ function settingsHTML() {
   <div class="row"><label>Velocity iterations</label><input type="number" id="sVel" value="${st.velIters}" step="1" min="1"></div>
   <div class="row"><label>Position iterations</label><input type="number" id="sPos" value="${st.posIters}" step="1" min="1"></div>
   <p class="note">g points down (−y); 0 turns gravity off. Impacts slower than the bounce threshold don't bounce. More iterations = stiffer joints and ropes.</p>
+  <h5>Analysis (not saved in the scene)</h5>
+  <div class="row"><label>Velocity arrows (m per m/s)</label><input class="ana" type="number" id="aV" value="${ana.scale.v}" step="0.05" min="0.001"></div>
+  <div class="row"><label>Accel. arrows (m per m/s²)</label><input class="ana" type="number" id="aA" value="${ana.scale.a}" step="0.01" min="0.001"></div>
+  <div class="row"><label>Momentum arrows (m per kg·m/s)</label><input class="ana" type="number" id="aP" value="${ana.scale.p}" step="0.05" min="0.001"></div>
+  <div class="row"><label>Trail length (s)</label><input class="ana" type="number" id="aTr" value="${ana.trailSec}" step="1" min="0.5"></div>
+  <div class="row"><label>Point O for L, τ (x, y m)</label><input class="ana" type="number" id="aOx" value="${ana.O.x}" step="0.1"><input class="ana" type="number" id="aOy" value="${ana.O.y}" step="0.1"></div>
   <h5>Shortcuts</h5>
   <p class="note">V select · B block · D disk · S spring · R rope · F force · P pin · L line · T label<br>
   Shift: 15° angle steps / rotate in 15° steps · Alt: no snapping · Esc: cancel / back to Select<br>
@@ -1512,6 +1573,11 @@ function bindSettings() {
   bind('sRest', (el) => { const v = parseFloat(el.value); if (v >= 0) st.restThreshold = v; });
   bind('sVel', (el) => { const v = Math.round(parseFloat(el.value)); if (v >= 1) st.velIters = Math.min(500, v); });
   bind('sPos', (el) => { const v = Math.round(parseFloat(el.value)); if (v >= 1) st.posIters = Math.min(500, v); });
+  // analysis settings live outside the scene: no undo step, allowed while simulating
+  const bindA = (id, fn) => { const el = $(id); if (el) el.onchange = () => { const v = parseFloat(el.value); if (isFinite(v)) { fn(v); saveAna(); render(); refreshAnalysis(); } }; };
+  bindA('aV', (v) => { if (v > 0) ana.scale.v = v; }); bindA('aA', (v) => { if (v > 0) ana.scale.a = v; }); bindA('aP', (v) => { if (v > 0) ana.scale.p = v; });
+  bindA('aTr', (v) => { if (v > 0) ana.trailSec = v; });
+  bindA('aOx', (v) => { ana.O = { ...ana.O, x: v }; ana.Oset = true; }); bindA('aOy', (v) => { ana.O = { ...ana.O, y: v }; ana.Oset = true; });
 }
 let msgTimer = null;
 function msg(t) { $('stMsg').textContent = t; clearTimeout(msgTimer); msgTimer = setTimeout(() => { $('stMsg').textContent = ''; }, 4000); }
@@ -1725,7 +1791,7 @@ const OMEGA_DT_TARGET = 0.01;   // substep until omega*dt <= this (accuracy targ
 const MAX_SUBSTEPS = 400;
 const MASS_FLOOR = 1e-3;        // kg: a movable body can't have zero mass in Box2D
 const PIN_TOL = 0.02;           // m: how close a pin must be to a body to grab it
-const NO_UD = { mu_s: 1, mu_k: 1, e: 0, stick: false, id: '?' };
+const NO_UD = { mu_s: 1, mu_k: 1, e: 0, stick: false, id: '?', tag: '?' };
 // Box2D lets touching shapes overlap by linearSlop (default 5 mm) and wraps polygons and edges in a
 // "skin" of 2 x linearSlop (1 cm). At textbook sizes that's visible in the numbers: a disk rolls on an
 // effective radius 2.5 mm too small, and a block drawn flush on the floor hops 1.5 cm at t = 0.
@@ -1809,7 +1875,13 @@ class Sim {
     this.torsions = [];                        // torsion springs at pins
     this.ropes = [];                           // RopeSegment joints
     this.rodLinks = [];                        // massless rods (for redrawing)
+    this.joints = [];                          // every rigid joint, for reaction forces (Section 20)
+    this.byBody = new Map();                   // planck body -> body record
     this.stickQueue = []; this.stuck = new Set();
+    // Phase 3 bookkeeping: impulses applied during the current substep, and energy that left
+    // the mechanical system (friction/impacts, dampers, ropes/joints) or entered it (applied loads).
+    this.subQ = []; this.h = this.dt;
+    this.Eloss = { contact: 0, damper: 0, joint: 0 }; this.Win = 0;
     this.buildSurfaces();
     this.buildBodies();
     this.glueFreePoints();
@@ -1819,7 +1891,11 @@ class Sim {
     this.buildRopes();
     this.chooseSubsteps();
     this.listenContacts();
-    this.Ug0 = this.energy().Ug;
+    this.dynRecs = [...this.recs.values()].filter((r) => r.body.isDynamic() && !r.ideal);
+    const E0 = this.energy();
+    this.Ug0 = E0.Ug; this.E0 = E0;
+    this.rec = new Recorder(Math.max(1, Math.round(1 / (120 * this.dt))));   // ~120 samples per second
+    this.sample();
   }
   warn(t) { if (!this.warnings.includes(t)) this.warnings.push(t); }
 
@@ -1832,7 +1908,7 @@ class Sim {
       // Resting contact sits at (skin - slop) from the edge line, so move the line that far into the solid.
       pts = offsetPolyline(pts, o.side || 1, SKIN - SLOP);
       const shape = pts.length === 2 ? new planck.Edge(v2(pts[0]), v2(pts[1])) : new planck.Chain(pts.map(v2), false);
-      this.ground.createFixture(shape, { friction: o.mu_s, restitution: o.e, userData: { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: false, id: 'ground' } });
+      this.ground.createFixture(shape, { friction: o.mu_s, restitution: o.e, userData: { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: false, id: o.id, tag: 's', ground: true } });
     }
   }
 
@@ -1849,7 +1925,7 @@ class Sim {
         position: new planck.Vec2(o.x, o.y), angle: o.angle || 0,
         linearVelocity: new planck.Vec2(+o.vx || 0, +o.vy || 0), angularVelocity: +o.omega || 0,
       });
-      const ud = { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: o.stick, id: o.id };
+      const ud = { mu_s: o.mu_s, mu_k: o.mu_k, e: o.e, stick: o.stick, id: o.id, tag: 'b' };
       const fd = (u = ud) => ({ density: 0, friction: u.mu_s, restitution: u.e, userData: u, filterMaskBits: o.collide ? 0xffff : 0 });
       // Polygons get a skin of SKIN around them, so build them that much smaller than drawn.
       const box = (hw, hh) => new planck.Box(Math.max(SKIN, hw - SKIN), Math.max(SKIN, hh - SKIN));
@@ -1858,8 +1934,10 @@ class Sim {
         case 'cart': {
           // Phase 2 cart = "frictionless cart": the wheels touch the ground but have mu = 0.
           body.createFixture(box(o.w / 2, o.h / 2), fd());
-          const wheel = { ...ud, mu_s: 0, mu_k: 0 };
-          for (const sx of [-0.3, 0.3]) body.createFixture(new planck.Circle(new planck.Vec2(o.w * sx, -o.h / 2 - o.wheelR), o.wheelR), fd(wheel));
+          for (const sx of [-0.3, 0.3]) {
+            const wheel = { ...ud, mu_s: 0, mu_k: 0, tag: sx < 0 ? 'wl' : 'wr' };     // tags keep the two wheels' normal forces apart
+            body.createFixture(new planck.Circle(new planck.Vec2(o.w * sx, -o.h / 2 - o.wheelR), o.wheelR), fd(wheel));
+          }
           break;
         }
         case 'disk': case 'pulley': body.createFixture(new planck.Circle(o.r), fd()); break;
@@ -1873,11 +1951,29 @@ class Sim {
         // Center of mass at the body origin, I about that point.
         body.setMassData({ mass: m, center: new planck.Vec2(0, 0), I });
       }
-      this.recs.set(o.id, { o, body, m, I, ideal, angle0: o.angle || 0 });
+      // links: what the body is connected to (used to recognize textbook setups for the period readout).
+      // ledger: every force acting on the body, averaged over the last step (Section 20).
+      const rec = { o, body, m, I, ideal, angle0: o.angle || 0, c0: { x: o.x, y: o.y }, name: bodyName(o), links: [], ledger: new Map(), vs: null, vp: null, a: { x: NaN, y: NaN, al: NaN } };
+      this.recs.set(o.id, rec);
+      this.byBody.set(body, rec);
       if (o.type === 'pulley' && o.fixed && o.mass > 0) {
-        this.world.createJoint(new planck.RevoluteJoint({}, this.ground, body, new planck.Vec2(o.x, o.y)));
+        this.addJoint(new planck.RevoluteJoint({}, this.ground, body, new planck.Vec2(o.x, o.y)), 'pin', 'R', 'Axle reaction');
+        this.link(this.ground, body, { type: 'pin', anchor: { x: o.x, y: o.y }, kappa: 0 });
       }
     }
+  }
+  // Create a Box2D joint and remember it so its reaction force can be read after every substep.
+  // useB: Box2D applies a prismatic/wheel joint's force on body A at body B's anchor.
+  addJoint(j, kind, tex, desc, useB = false) {
+    this.world.createJoint(j);
+    this.joints.push({ j, kind, tex, desc, useB, i: this.joints.length });
+    return j;
+  }
+  // Record a connection on both bodies' link lists.
+  link(A, B, info) {
+    const ra = this.byBody.get(A), rb = this.byBody.get(B);
+    if (ra) ra.links.push({ ...info, other: B });
+    if (rb) rb.links.push({ ...info, other: A });
   }
   // Every body record whose shape covers world point p (the referenced body first, then movable ones).
   bodiesAt(p, preferId = null) {
@@ -1928,9 +2024,10 @@ class Sim {
       for (const r of list.slice(1)) if (list[0].body.isDynamic() || r.body.isDynamic()) pairs.push([list[0].body, r.body]);
     }
     for (const [A, B] of pairs) {
-      const j = o.type === 'pin' ? new planck.RevoluteJoint({}, A, B, v2(p)) : new planck.WeldJoint({ frequencyHz: 0 }, A, B, v2(p));
-      this.world.createJoint(j);
-      if (o.type === 'pin' && o.torsionK > 0) this.torsions.push({ k: o.torsionK, A, B, rel0: B.getAngle() - A.getAngle() });
+      if (o.type === 'pin') this.addJoint(new planck.RevoluteJoint({}, A, B, v2(p)), 'pin', 'R', `Pin reaction (${o.id})`);
+      else this.addJoint(new planck.WeldJoint({ frequencyHz: 0 }, A, B, v2(p)), 'weld', 'R_w', `Weld reaction (${o.id})`);
+      this.link(A, B, { type: o.type, anchor: { x: p.x, y: p.y }, kappa: o.type === 'pin' ? +o.torsionK || 0 : 0 });
+      if (o.type === 'pin' && o.torsionK > 0) this.torsions.push({ k: o.torsionK, A, B, rel0: B.getAngle() - A.getAngle(), id: o.id });
     }
   }
   buildMasslessRod(o) {
@@ -1940,7 +2037,8 @@ class Sim {
     const end = (p) => { const r = this.bodiesAt(p)[0]; const body = r ? r.body : this.ground; return { body, local: body.getLocalPoint(v2(p)) }; };
     const ea = end(pa), eb = end(pb);
     if (ea.body === eb.body || (!ea.body.isDynamic() && !eb.body.isDynamic())) { this.warn(`Massless rod ${o.id} isn't connecting two things, so it does nothing.`); return; }
-    this.world.createJoint(new planck.DistanceJoint({ frequencyHz: 0, dampingRatio: 0 }, ea.body, eb.body, v2(pa), v2(pb)));
+    this.addJoint(new planck.DistanceJoint({ frequencyHz: 0, dampingRatio: 0 }, ea.body, eb.body, v2(pa), v2(pb)), 'rod', 'F_{rod}', `Rod force (${o.id})`);
+    this.link(ea.body, eb.body, { type: 'rod', len: o.len, pa, pb });
     this.rodLinks.push({ o, ea, eb });
   }
   buildTrack(o) {
@@ -1957,7 +2055,8 @@ class Sim {
       const j = o.rotate
         ? new planck.WheelJoint({ frequencyHz: 0, dampingRatio: 0 }, this.ground, r.body, c, v2(u))
         : new planck.PrismaticJoint({ enableLimit: true, lowerTranslation: -s, upperTranslation: L - s }, this.ground, r.body, c, v2(u));
-      this.world.createJoint(j);
+      this.addJoint(j, 'track', 'N_t', `Track force (${o.id})`, true);
+      this.link(this.ground, r.body, { type: 'track', axis: u });
     }
   }
 
@@ -1965,8 +2064,9 @@ class Sim {
   buildElements() {
     for (const o of scene.objects) {
       if (!['spring', 'damper', 'springdamper', 'actuator'].includes(o.type) || !o.a || !o.b) continue;
-      const el = { o, A: this.attach(o.a), B: this.attach(o.b), T: 0 };
+      const el = { o, A: this.attach(o.a), B: this.attach(o.b), T: 0, L: 0, Ldot: 0 };
       if (!el.A.body.isDynamic() && !el.B.body.isDynamic()) continue;
+      el.u0 = V.unit(V.sub(el.B.body.getWorldPoint(el.B.local), el.A.body.getWorldPoint(el.A.local)));   // direction at t = 0
       if (o.type === 'actuator') {
         try { el.law = Expr.compile(String(o.law), ['t', 'd', 'v']); } catch (err) { el.law = () => 0; this.warn(`Actuator ${o.id}: ${err.message} (using F = 0).`); }
       }
@@ -1977,12 +2077,12 @@ class Sim {
   //   spring:   T = k*delta            (nonlinear: k2*delta + k3*delta^3), delta = L - L0
   //   damper:   T = c*dL/dt            (resists the ends moving apart or together)
   //   actuator: T = -F(t, delta, v)    (F > 0 pushes the ends apart)
+  // Returned as three parts (spring, damper, actuator) so the free-body diagram can show them separately.
   tension(el, L, Ldot) {
-    const o = el.o, d = L - o.restLen;
-    let T = 0;
-    if (o.type === 'spring' || o.type === 'springdamper') T += o.nonlinear ? o.k2 * d + o.k3 * d * d * d : o.k * d;
-    if (o.type === 'damper' || o.type === 'springdamper') T += o.c * Ldot;
-    if (o.type === 'actuator') T -= el.law({ t: this.tMid, d, v: Ldot });
+    const o = el.o, d = L - o.restLen, T = { s: 0, d: 0, a: 0 };
+    if (o.type === 'spring' || o.type === 'springdamper') T.s = o.nonlinear ? o.k2 * d + o.k3 * d * d * d : o.k * d;
+    if (o.type === 'damper' || o.type === 'springdamper') T.d = o.c * Ldot;
+    if (o.type === 'actuator') T.a = -el.law({ t: this.tMid, d, v: Ldot });
     return T;
   }
   applyElement(el) {
@@ -1993,11 +2093,18 @@ class Sim {
     const u = V.mul(V.sub(pB, pA), 1 / L);                      // unit vector A -> B
     const vA = A.getLinearVelocityFromLocalPoint(el.A.local), vB = B.getLinearVelocityFromLocalPoint(el.B.local);
     const Ldot = V.dot(V.sub(vB, vA), u);                       // rate of stretching
-    const T = this.tension(el, L, Ldot);
-    el.T = T;
+    const parts = this.tension(el, L, Ldot), T = parts.s + parts.d + parts.a;
+    el.T = T; el.L = L; el.Ldot = Ldot;
     // Equal and opposite (Newton's 3rd law), along the line between the attachment points.
     A.applyForce(new planck.Vec2(u.x * T, u.y * T), pA, true);
     B.applyForce(new planck.Vec2(-u.x * T, -u.y * T), pB, true);
+    // Log each part as an impulse (force x substep time) for the free-body diagram and energy bookkeeping.
+    const rA = V.sub(pA, A.getWorldCenter()), rB = V.sub(pB, B.getWorldCenter()), h = this.h, id = el.o.id;
+    for (const [val, key, kind, tex, what] of [[parts.s, 'sp:', 'spring', 'F_s', 'Spring'], [parts.d, 'dp:', 'damper', 'F_d', 'Damper'], [parts.a, 'ac:', 'actuator', 'F_a', 'Actuator']]) {
+      if (!val) continue;
+      this.push(A, key + id, kind, tex, `${what} (${id})`, u.x * val * h, u.y * val * h, rA, 0);
+      this.push(B, key + id, kind, tex, `${what} (${id})`, -u.x * val * h, -u.y * val * h, rB, 0);
+    }
   }
 
   /* ---- Applied forces F(t) and moments M(t) ---- */
@@ -2014,16 +2121,24 @@ class Sim {
   applyLoad(ld) {
     const body = ld.at.body, mag = ld.law({ t: this.tMid });
     if (!isFinite(mag)) return;
-    if (ld.o.type === 'moment') { body.applyTorque(mag, true); return; }
+    const o = ld.o, tex = o.label || (o.type === 'moment' ? 'M' : 'F'), desc = `${o.type === 'moment' ? 'Applied moment' : 'Applied force'} ${plainTex(o.label)} (${o.id})`;
+    if (o.type === 'moment') {
+      body.applyTorque(mag, true);
+      this.push(body, 'ld:' + o.id, 'moment', tex, desc, 0, 0, null, mag * this.h);
+      return;
+    }
     // world frame: fixed direction. body frame: the direction turns with the body.
-    const deg = ld.o.frame === 'body' ? ld.angle0 + toDeg(body.getAngle() - ld.theta0) : ld.o.angle;
-    const d = V.dir(toRad(deg));
-    body.applyForce(new planck.Vec2(d.x * mag, d.y * mag), body.getWorldPoint(ld.at.local), true);
+    const deg = o.frame === 'body' ? ld.angle0 + toDeg(body.getAngle() - ld.theta0) : o.angle;
+    const d = V.dir(toRad(deg)), p = body.getWorldPoint(ld.at.local);
+    body.applyForce(new planck.Vec2(d.x * mag, d.y * mag), p, true);
+    this.push(body, 'ld:' + o.id, 'applied', tex, desc, d.x * mag * this.h, d.y * mag * this.h, V.sub(p, body.getWorldCenter()), 0);
   }
   applyTorsion(ts) {
     // Torsion spring at a pin: torque = -kappa * (relative angle - starting relative angle)
     const tau = -ts.k * (ts.B.getAngle() - ts.A.getAngle() - ts.rel0);
     ts.B.applyTorque(tau, true); ts.A.applyTorque(-tau, true);
+    this.push(ts.B, 'ts:' + ts.id, 'torsion', '\\tau_\\kappa', `Torsion spring (${ts.id})`, 0, 0, null, tau * this.h);
+    this.push(ts.A, 'ts:' + ts.id, 'torsion', '\\tau_\\kappa', `Torsion spring (${ts.id})`, 0, 0, null, -tau * this.h);
   }
 
   /* ---- Ropes (the constraint itself is in Section 17) ---- */
@@ -2050,11 +2165,14 @@ class Sim {
         if (!bodies.length) continue;                            // rope between two fixed things: nothing to do
         const seg = new RopeSegment(this, segNodes, first ? +o.slack || 0 : 0);
         first = false;
-        seg.ropeId = o.id;
+        seg.ropeId = o.id; seg.impStep = 0; seg.Tavg = 0;
+        seg.part = nodes.some((nd) => nd.kind === 'grip') ? this.ropes.filter((r) => r.ropeId === o.id).length + 1 : 0;
         this.world.createJoint(seg);
         // A rope touches more than 2 bodies: tie the extras into the same island (see Section 17).
         for (const b of bodies.slice(2)) this.world.createJoint(new LinkJoint(bodies[0], b));
         this.ropes.push(seg);
+        if (bodies.length >= 2) this.link(bodies[0], bodies[1], { type: 'rope' });
+        else if (segNodes.length === 2) this.link(segNodes[0].body, segNodes[1].body, { type: 'rope', len: seg.Lrest, pa: posePt(segNodes[0].body.m_sweep, segNodes[0].local || { x: 0, y: 0 }), pb: posePt(segNodes[1].body.m_sweep, segNodes[1].local || { x: 0, y: 0 }) });
       }
     }
   }
@@ -2104,8 +2222,24 @@ class Sim {
         slip = Math.max(slip, Math.abs(V.dot(rel, t)));
       }
       // Box2D has one friction coefficient, so pick mu_s or mu_k each step from the sliding speed.
-      contact.setFriction(slip > SLIP_SPEED ? Math.min(a.mu_k, b.mu_k) : Math.min(a.mu_s, b.mu_s));
+      contact.msSliding = slip > SLIP_SPEED;                   // remembered for the FBD (f_s vs f_k)
+      contact.setFriction(contact.msSliding ? Math.min(a.mu_k, b.mu_k) : Math.min(a.mu_s, b.mu_s));
       contact.setRestitution(a.stick || b.stick ? 0 : Math.max(a.e, b.e));
+    });
+    // post-solve runs after Box2D solved a contact and reports the impulses it applied: a normal
+    // impulse Pn along the contact normal n (A -> B) and a friction impulse Pt along t = (n.y, -n.x).
+    // Body B received +P and body A received -P, at lever arms rB and rA from their centers.
+    this.world.on('post-solve', (contact) => {
+      const cnt = contact.v_pointCount, n = contact.v_normal;
+      if (!cnt) return;
+      const fA = contact.getFixtureA(), fB = contact.getFixtureB();
+      const a = fA.getUserData() || NO_UD, b = fB.getUserData() || NO_UD;
+      const A = fA.getBody(), B = fB.getBody(), slide = !!contact.msSliding;
+      for (let i = 0; i < cnt; i++) {
+        const vp = contact.v_points[i], Pn = vp.normalImpulse, Pt = vp.tangentImpulse;
+        this.pushContact(B, b, a, A, Pn * n.x, Pn * n.y, Pt * n.y, -Pt * n.x, vp.rB, slide);
+        this.pushContact(A, a, b, B, -Pn * n.x, -Pn * n.y, -Pt * n.y, Pt * n.x, vp.rA, slide);
+      }
     });
     // Stick on contact: remember the pair now (the world is locked during callbacks), weld after the step.
     this.world.on('begin-contact', (contact) => {
@@ -2121,28 +2255,44 @@ class Sim {
     });
   }
   flushStick() {
-    for (const s of this.stickQueue) this.world.createJoint(new planck.WeldJoint({ frequencyHz: 0 }, s.A, s.B, v2(s.p)));
+    for (const s of this.stickQueue) this.addJoint(new planck.WeldJoint({ frequencyHz: 0 }, s.A, s.B, v2(s.p)), 'weld', 'R_w', 'Stuck-on weld');
     this.stickQueue = [];
   }
 
   /* ---- The physics loop: one fixed time step dt, split into `sub` equal substeps ---- */
   step() {
     const h = this.dt / this.sub;
+    this.h = h;
+    this.beginStep();
     for (let i = 0; i < this.sub; i++) {
+      this.subQ.length = 0;
+      for (const r of this.recs.values()) {                      // velocities before this substep (for work)
+        if (!r.body.isDynamic()) continue;
+        const v = r.body.getLinearVelocity();
+        r.vp = { x: v.x, y: v.y, w: r.body.getAngularVelocity() };
+      }
       // 1. Explicit forces from the current positions and velocities (Box2D clears them after each step).
       //    Time-varying laws F(t) are read at the middle of the substep (exact for F = a + b t).
       this.tMid = this.t + h / 2;
       for (const el of this.elements) this.applyElement(el);
       for (const ld of this.loads) this.applyLoad(ld);
       for (const ts of this.torsions) this.applyTorsion(ts);
+      this.pushGravity();
       // 2. Box2D: add gravity + forces to velocities, solve joints/contacts/ropes, move the bodies.
+      //    (Contact impulses are logged by the post-solve callback while this runs.)
       this.world.step(h, this.velIters, this.posIters);
       this.t += h;
-      // 3. Joints that had to wait until the world was unlocked.
+      // 3. Log what the joints and ropes did, then turn this substep's impulses into forces and work.
+      this.pushJoints();
+      this.pushRopes();
+      this.processQueue();
+      // 4. Joints that had to wait until the world was unlocked.
       if (this.stickQueue.length) this.flushStick();
     }
     this.steps++;
     this.t = this.steps * this.dt;                               // avoid round-off build-up
+    this.endStep();
+    if (this.steps % this.rec.every === 0) this.sample();
   }
 
   // Copy body positions back into the scene so the normal renderer draws the moving system.
@@ -2153,6 +2303,148 @@ class Sim {
     }
     for (const rl of this.rodLinks) Object.assign(rl.o, rodGeom(rl.ea.body.getWorldPoint(rl.ea.local), rl.eb.body.getWorldPoint(rl.eb.local)));
     for (const ld of this.loads) if (ld.o.type === 'force' && ld.o.frame === 'body') ld.o.angle = ld.angle0 + toDeg(ld.at.body.getAngle() - ld.theta0);
+  }
+
+  /* ---- Force ledger (Phase 3) ----
+     Every impulse that changes a body's motion is logged here: gravity, springs, dampers,
+     actuators, applied loads, torsion springs, contact normal and friction, joint reactions and
+     rope tension. An impulse is force x time, so adding them up over a step and dividing by dt
+     gives the average force. Because these are exactly the impulses the solver applied,
+     sum(F) = m * (change in v) / dt holds to round-off: that's the FBD's "sum F = m a" check.
+     Work = impulse . (average velocity of the point it acts on), summed over substeps. */
+  // r: lever arm from the body's center to the point of application (null = at the center).
+  // m: pure angular impulse (a moment x time) on top of r x impulse.
+  push(body, key, kind, tex, desc, ix, iy, r, m, other = null, slide = false) {
+    if (!body.isDynamic()) return;
+    this.subQ.push({ body, key, kind, tex, desc, ix, iy, rx: r ? r.x : 0, ry: r ? r.y : 0, m, other, slide });
+  }
+  pushContact(body, self, oth, other, nx, ny, fx, fy, r, slide) {
+    if (!body.isDynamic()) return;
+    const k = self.tag + ':' + oth.id;
+    const from = oth.ground ? `surface ${oth.id}` : (this.recs.get(oth.id) || { name: oth.id }).name;
+    this.push(body, 'cn:' + k, 'normal', 'N', `Normal force from ${from}`, nx, ny, r, 0, other);
+    if (fx || fy) this.push(body, 'cf:' + k, 'friction', slide ? 'f_k' : 'f_s', `${slide ? 'Kinetic' : 'Static'} friction from ${from}`, fx, fy, r, 0, other, slide);
+  }
+  pushGravity() {
+    const g = this.world.getGravity(), h = this.h;
+    // (includes the tiny placeholder mass of a moving ideal pulley, so sum F = m a holds for it too)
+    for (const r of this.recs.values()) {
+      if (r.body.isDynamic()) this.push(r.body, 'g', 'gravity', 'mg', 'Gravity (weight)', r.m * g.x * h, r.m * g.y * h, null, 0);
+    }
+  }
+  // Joint reactions. getReactionForce(1) is the impulse the joint gave body B this substep; A got the opposite.
+  pushJoints() {
+    for (const jr of this.joints) {
+      const j = jr.j, A = j.getBodyA(), B = j.getBodyB();
+      const R = j.getReactionForce(1), tq = j.getReactionTorque(1);
+      if (!R.x && !R.y && !tq) continue;
+      // Revolute, weld and distance joints keep their exact lever arms (m_rA, m_rB) from the solve.
+      const pB = j.getAnchorB(), pA = jr.useB ? pB : j.getAnchorA(), cA = A.getWorldCenter(), cB = B.getWorldCenter();
+      const rB = j.m_rB && !jr.useB ? j.m_rB : V.sub(pB, cB), rA = j.m_rA && !jr.useB ? j.m_rA : V.sub(pA, cA);
+      this.push(B, 'jt:' + jr.i, jr.kind, jr.tex, jr.desc, R.x, R.y, rB, tq, A);
+      this.push(A, 'jt:' + jr.i, jr.kind, jr.tex, jr.desc, -R.x, -R.y, rA, -tq, B);
+    }
+  }
+  // Rope tension: each node of a segment is pulled along its spans with impulse |acc|.
+  pushRopes() {
+    this.ropes.forEach((seg, i) => {
+      const lam = -seg.acc;
+      seg.impStep += Math.max(0, lam);
+      if (!(lam > 0) || !seg.nodeInfo) return;
+      for (const nd of seg.nodeInfo) this.push(nd.body, 'rp:' + i, 'tension', 'T', `Tension (rope ${seg.ropeId}${seg.part ? ', part ' + seg.part : ''})`, nd.E.x * lam, nd.E.y * lam, nd.r, 0);
+    });
+  }
+  processQueue() {
+    for (const it of this.subQ) {
+      const rec = this.byBody.get(it.body);
+      if (!rec) continue;
+      let e = rec.ledger.get(it.key);
+      if (!e) {
+        e = { key: it.key, kind: it.kind, tex: it.tex, desc: it.desc, other: null, ix: 0, iy: 0, ang: 0, mp: 0, psx: 0, psy: 0, pw: 0, wStep: 0,
+          W: 0, P: 0, F: { x: 0, y: 0 }, tau: 0, M: 0, p: null, active: false, slide: false, sx: 0, sy: 0, sm: 0 };
+        rec.ledger.set(it.key, e);
+      }
+      e.tex = it.tex; e.desc = it.desc; e.slide = it.slide;
+      if (it.other) e.other = it.other;
+      e.ix += it.ix; e.iy += it.iy;
+      e.ang += it.rx * it.iy - it.ry * it.ix + it.m;          // angular impulse about the center: r x I + pure moment
+      e.mp += it.m;
+      const mag = Math.hypot(it.ix, it.iy);
+      if (mag > 0) { const c = it.body.getWorldCenter(); e.psx += (c.x + it.rx) * mag; e.psy += (c.y + it.ry) * mag; e.pw += mag; }
+      // Work done this substep: impulse . average velocity of the point it acts on (trapezoid rule).
+      const v1 = rec.vp, v2 = it.body.getLinearVelocity(), w2 = it.body.getAngularVelocity();
+      const wa = (v1.w + w2) / 2, vax = (v1.x + v2.x) / 2 - wa * it.ry, vay = (v1.y + v2.y) / 2 + wa * it.rx;
+      const W = it.ix * vax + it.iy * vay + it.m * wa;
+      e.wStep += W;
+      // Energy bookkeeping. Gravity, springs and torsion springs are conservative (they're in U).
+      if (it.kind === 'normal' || it.kind === 'friction') this.Eloss.contact -= W;
+      else if (it.kind === 'damper') this.Eloss.damper -= W;
+      else if (it.kind === 'tension' || it.kind === 'pin' || it.kind === 'weld' || it.kind === 'rod' || it.kind === 'track') this.Eloss.joint -= W;
+      else if (it.kind === 'applied' || it.kind === 'moment' || it.kind === 'actuator') this.Win += W;
+    }
+    this.subQ.length = 0;
+  }
+  beginStep() {
+    for (const r of this.recs.values()) {
+      if (!r.body.isDynamic()) continue;
+      const v = r.body.getLinearVelocity();
+      r.vs = { x: v.x, y: v.y, w: r.body.getAngularVelocity() };
+      for (const e of r.ledger.values()) { e.ix = e.iy = e.ang = e.mp = e.psx = e.psy = e.pw = e.wStep = 0; }
+    }
+    for (const seg of this.ropes) seg.impStep = 0;
+  }
+  endStep() {
+    const dt = this.dt;
+    for (const r of this.recs.values()) {
+      if (!r.body.isDynamic()) continue;
+      const v = r.body.getLinearVelocity(), w = r.body.getAngularVelocity();
+      r.a = { x: (v.x - r.vs.x) / dt, y: (v.y - r.vs.y) / dt, al: (w - r.vs.w) / dt };   // average over the step
+      let fx = 0, fy = 0, tau = 0;
+      for (const e of r.ledger.values()) {
+        e.F = { x: e.ix / dt, y: e.iy / dt }; e.tau = e.ang / dt; e.M = e.mp / dt;
+        if (e.pw > 0) e.p = { x: e.psx / e.pw, y: e.psy / e.pw };
+        if (!e.p) { const c = r.body.getWorldCenter(); e.p = { x: c.x, y: c.y }; }
+        e.W += e.wStep; e.P = e.wStep / dt;
+        e.active = Math.abs(e.ix) + Math.abs(e.iy) + Math.abs(e.ang) > 1e-12;
+        e.sx += e.ix; e.sy += e.iy; e.sm += e.mp;               // impulse since the last graph sample
+        fx += e.F.x; fy += e.F.y; tau += e.tau;
+      }
+      r.Fnet = { x: fx, y: fy }; r.tauNet = tau;
+    }
+    for (const seg of this.ropes) seg.Tavg = seg.impStep / dt;
+  }
+  // One row of graph data (Section 22). Positions and velocities are values at this instant.
+  // Forces and accelerations are AVERAGES over the time since the previous sample, so the area under a
+  // force graph (sum of value x interval) is exactly the impulse, even for a collision lasting one step.
+  sample() {
+    const vals = [], dtS = this.t - (this.lastSampleT ?? this.t);
+    this.lastSampleT = this.t;
+    const add = (name, v, label, unit, avg = false) => vals.push([name, v, label, unit, avg]);
+    for (const r of this.dynRecs) {
+      const b = r.body, p = b.getWorldCenter(), v = b.getLinearVelocity(), w = b.getAngularVelocity(), id = r.o.id, nm = r.name;
+      const a = dtS > 0 && r.vSamp ? { x: (v.x - r.vSamp.x) / dtS, y: (v.y - r.vSamp.y) / dtS, al: (w - r.vSamp.w) / dtS } : { x: NaN, y: NaN, al: NaN };
+      r.vSamp = { x: v.x, y: v.y, w };
+      add(id + '.x', p.x, nm + ' x', 'm'); add(id + '.y', p.y, nm + ' y', 'm');
+      add(id + '.vx', v.x, nm + ' v_x', 'm/s'); add(id + '.vy', v.y, nm + ' v_y', 'm/s'); add(id + '.v', Math.hypot(v.x, v.y), nm + ' |v|', 'm/s');
+      add(id + '.ax', a.x, nm + ' a_x', 'm/s²', true); add(id + '.ay', a.y, nm + ' a_y', 'm/s²', true); add(id + '.a', Math.hypot(a.x, a.y), nm + ' |a|', 'm/s²', true);
+      add(id + '.th', b.getAngle(), nm + ' θ', 'rad'); add(id + '.w', w, nm + ' ω', 'rad/s'); add(id + '.al', a.al, nm + ' α', 'rad/s²', true);
+      let nx = 0, ny = 0;
+      for (const e of r.ledger.values()) {
+        const base = id + '.F.' + e.key, d = nm + ' ' + e.desc;
+        const Fx = dtS > 0 ? e.sx / dtS : 0, Fy = dtS > 0 ? e.sy / dtS : 0;
+        add(base, Math.hypot(Fx, Fy), d + ' |F|', 'N', true); add(base + '.x', Fx, d + ' F_x', 'N', true); add(base + '.y', Fy, d + ' F_y', 'N', true);
+        if (e.mp) add(base + '.M', dtS > 0 ? e.sm / dtS : 0, d + ' moment', 'N·m', true);
+        nx += Fx; ny += Fy; e.sx = e.sy = e.sm = 0;
+      }
+      if (dtS > 0) { add(id + '.F.net', Math.hypot(nx, ny), nm + ' net force |ΣF|', 'N', true); add(id + '.F.net.x', nx, nm + ' net force ΣF_x', 'N', true); add(id + '.F.net.y', ny, nm + ' net force ΣF_y', 'N', true); }
+    }
+    const E = this.energy(), P = this.momentum();
+    add('E.K', E.K, 'Translational KE', 'J'); add('E.Kr', E.Kr, 'Rotational KE', 'J'); add('E.Ug', E.Ug, 'Gravitational PE', 'J');
+    add('E.Us', E.Us, 'Spring PE', 'J'); add('E.Eth', E.Eth, 'Thermal energy', 'J'); add('E.Win', E.Win, 'Work by applied loads', 'J');
+    add('E.tot', E.total, 'Total (K + U + E_th − W_in)', 'J');
+    add('sys.px', P.px, 'System p_x', 'kg·m/s'); add('sys.py', P.py, 'System p_y', 'kg·m/s'); add('sys.p', Math.hypot(P.px, P.py), 'System |p|', 'kg·m/s');
+    add('sys.L', P.L, 'System L about O', 'kg·m²/s');
+    this.rec.add(this.t, vals);
   }
 
   // Mechanical energy (J). U_g is measured from y = 0.
@@ -2173,7 +2465,22 @@ class Sim {
       Us += o.nonlinear ? 0.5 * o.k2 * d * d + 0.25 * o.k3 * d ** 4 : 0.5 * o.k * d * d;
     }
     for (const ts of this.torsions) { const d = ts.B.getAngle() - ts.A.getAngle() - ts.rel0; Us += 0.5 * ts.k * d * d; }
-    return { K, Kr, Ug, Us, total: K + Kr + Ug + Us };
+    // Energy that left as heat (friction, impacts, dampers, rope jerks) and work put in by applied loads.
+    // total = K + U + E_th - W_in should stay constant: that's the "energy adds up" check.
+    const Eth = this.Eloss.contact + this.Eloss.damper + this.Eloss.joint;
+    const mech = K + Kr + Ug + Us;
+    return { K, Kr, Ug, Us, Eth, Win: this.Win, mech, total: mech + Eth - this.Win };
+  }
+  // System momentum and angular momentum about point O.
+  momentum(O = ana.O) {
+    let px = 0, py = 0, L = 0, M = 0, cx = 0, cy = 0, vx = 0, vy = 0;
+    for (const r of this.dynRecs) {
+      const c = r.body.getWorldCenter(), v = r.body.getLinearVelocity();
+      px += r.m * v.x; py += r.m * v.y; M += r.m; cx += r.m * c.x; cy += r.m * c.y;
+      L += (c.x - O.x) * r.m * v.y - (c.y - O.y) * r.m * v.x + r.I * r.body.getAngularVelocity();   // r x mv + I w
+    }
+    if (M > 0) { cx /= M; cy /= M; vx = px / M; vy = py / M; }
+    return { px, py, L, M, com: { x: cx, y: cy }, vcom: { x: vx, y: vy } };
   }
 }
 
@@ -2248,8 +2555,9 @@ class RopeSegment extends JointBase {
     const { C, poses, spans } = this.spans(inSolver), n = this.nodes.length;
     let L = 0;
     for (const sp of spans) L += V.dist(sp.p1, sp.p2);
-    const J = new Map();
+    const J = new Map(), info = [];
     const addJ = (body, E, r) => {
+      info.push({ body, E, r });                         // per node, for the free-body diagram
       if (!body.isDynamic()) return;
       if (!J.has(body)) J.set(body, { body, x: 0, y: 0, w: 0 });
       const j = J.get(body);
@@ -2277,7 +2585,7 @@ class RopeSegment extends JointBase {
         L += nd.role * nd.R * nd.s * ((phi - nd.phi0) - (poses[i].a - nd.theta0));
       }
     });
-    return { L, J: [...J.values()] };
+    return { L, J: [...J.values()], info };
   }
   effMass(J) {
     let k = 0;
@@ -2292,7 +2600,7 @@ class RopeSegment extends JointBase {
   }
   initVelocityConstraints(step) {
     const g = this.geom(true, true);
-    this.L = g.L; this.J = g.J; this.mass = this.effMass(g.J); this.invDt = step.inv_dt;
+    this.L = g.L; this.J = g.J; this.nodeInfo = g.info; this.mass = this.effMass(g.J); this.invDt = step.inv_dt;
     if (step.warmStarting) { this.acc *= step.dtRatio; this.applyImpulse(this.acc); } else this.acc = 0;
   }
   solveVelocityConstraints(step) {
@@ -2340,7 +2648,7 @@ class LinkJoint extends JointBase {
    same run replays exactly. The physics always advances in whole steps
    of dt no matter the frame rate (an "accumulator" collects real time).
    ===================================================================== */
-const run = { sim: null, snapshot: null, playing: false, acc: 0, speed: 1, last: 0, slow: false, panelAt: 0 };
+const run = { sim: null, snapshot: null, playing: false, acc: 0, speed: 1, last: 0, slow: false, anaAt: 0, rec: null };
 const FRAME_BUDGET_MS = 14;
 
 function startSim() {
@@ -2353,8 +2661,9 @@ function startSim() {
     msg('Could not start the simulation: ' + err.message);
     return false;
   }
-  if (ui.tool !== 'select') setTool('select');
+  if (ui.tool !== 'select' && !TOOLS[ui.tool].ana) setTool('select');
   ui.pending = []; ui.rope = null;
+  run.rec = run.sim.rec;                         // graphs read this (and keep the last run after Reset)
   run.sim.sync(); render(); showPanel();
   return true;
 }
@@ -2366,17 +2675,18 @@ function playPause() {
 function stepOnce() {
   if (!run.sim && !startSim()) return;
   run.playing = false;
-  run.sim.step(); run.sim.sync(); render(); showPanel(); updateSimUI();
+  run.sim.step(); run.sim.sync(); render(); refreshAnalysis(); updateSimUI();
 }
 function resetSim() {
   if (!run.snapshot) return;
   scene = JSON.parse(run.snapshot);
-  endSim();
+  endSim(true);                                  // keep the recorded data so the graphs still show the last run
   ui.sel = new Set([...ui.sel].filter((id) => byId(id)));
   render(); showPanel();
 }
 // Forget the simulation without restoring anything (used before New / Open / Examples).
-function endSim() {
+function endSim(keepData = false) {
+  if (!keepData) run.rec = null;
   run.sim = null; run.snapshot = null; run.playing = false; run.acc = 0; run.slow = false;
   updateSimUI();
 }
@@ -2403,8 +2713,8 @@ function frame(now) {
       run.sim.step(); run.acc -= run.sim.dt; n++;
     }
     if (n) { run.sim.sync(); render(); }
-    // Keep the (read-only) properties panel showing current values, 4 times a second.
-    if (n && ui.sel.size === 1 && now - run.panelAt > 250) { run.panelAt = now; showPanel(); }
+    // Readouts, free-body diagram and graphs: 8 times a second is plenty to read and costs little.
+    if (n && now - run.anaAt > 125) { run.anaAt = now; refreshAnalysis(); }
     updateSimUI();
   }
   requestAnimationFrame(frame);
@@ -2566,13 +2876,71 @@ const TESTS = [
     const drift = (mean(E.filter((e, i) => ts[i] > 9)) - mean(E.filter((e, i) => ts[i] <= 1))) / E0;
     return { meas: `max |E − E₀|/E₀ = ${(maxDev * 100).toFixed(3)}%, drift = ${(drift * 100).toFixed(3)}%`, exp: '≤ 1%, drift ≈ 0 (< 0.2%)', pass: maxDev <= 0.01 && Math.abs(drift) < 0.002 };
   } },
+
+  /* ---- Phase 3: checks of the analysis tools (force ledger, energy bookkeeping, impulse, readouts) ---- */
+  { group: 'Phase 3 analysis tools', name: 'FBD: block sliding on 30°, μk = 0.3 (N, f_k, ΣF = m a)', run() {
+    const sc = inclineScene(0.5, 0.3, (add) => add('block', { ...onIncline(6, 0.2), w: 0.4, h: 0.4, angle: INC, mass: 1 }));
+    const sim = simulate(sc, 1), r = sim.recs.get(sc.objects[1].id), es = [...r.ledger.values()].filter((e) => e.active);
+    const N = es.find((e) => e.kind === 'normal'), fr = es.find((e) => e.kind === 'friction');
+    const n = Math.hypot(N.F.x, N.F.y), f = Math.hypot(fr.F.x, fr.F.y), wantN = 9.81 * Math.cos(INC);
+    const ok = relErr(n, wantN) <= 0.005 && relErr(f, 0.3 * n) <= 0.005 && fr.tex === 'f_k' && near(r.Fnet.x, r.m * r.a.x) && near(r.Fnet.y, r.m * r.a.y);
+    return { meas: `N = ${n.toFixed(4)} N, ${fr.tex} = ${f.toFixed(4)} N, ΣF − m a = ${Math.hypot(r.Fnet.x - r.a.x, r.Fnet.y - r.a.y).toExponential(1)} N`, exp: `N = ${wantN.toFixed(3)}, f_k = 0.3 N, ΣF = m a`, pass: ok };
+  } },
+  { name: 'FBD: Atwood tensions (massless and 2 kg pulley)', run() {
+    const T = (pm) => { const sc = atwoodScene(pm), sim = simulate(sc, 0.5); return [1, 2].map((k) => { const e = [...sim.recs.get(sc.objects[k].id).ledger.values()].find((x) => x.kind === 'tension'); return Math.hypot(e.F.x, e.F.y); }); };
+    const [a1, a2] = T(0), [b1, b2] = T(2), g = 9.81;
+    const wA = 2 * 2 * 3 * g / 5, wB1 = 2 * (g + g / 6), wB2 = 3 * (g - g / 6);
+    const pass = relErr(a1, wA) <= 0.005 && relErr(a2, wA) <= 0.005 && relErr(b1, wB1) <= 0.005 && relErr(b2, wB2) <= 0.005;
+    return { meas: `T = ${a1.toFixed(3)}, ${a2.toFixed(3)} N; with pulley T₁ = ${b1.toFixed(3)}, T₂ = ${b2.toFixed(3)} N`, exp: `T = ${wA.toFixed(3)} N; T₁ = ${wB1.toFixed(3)}, T₂ = ${wB2.toFixed(3)} N`, pass };
+  } },
+  { name: 'Impulse = area under F(t) = Δp (elastic collision)', run() {
+    const sc = testScene((add) => { add('disk', { x: 0, y: 1, r: 0.1, mass: 1, e: 1, vx: 2 }); add('disk', { x: 1, y: 1, r: 0.1, mass: 1, e: 1 }); }, 0);
+    const sim = simulate(sc, 1), rec = sim.rec, id = sc.objects[1].id;
+    const name = [...rec.cols.keys()].find((k) => k.startsWith(id + '.F.cn:') && k.endsWith('.x'));
+    const J = integrate(rec.t, rec.col(name), 0, sim.t), dp = recOf(sim, sc.objects[1]).getLinearVelocity().x * 1;
+    return { meas: `∫F_x dt = ${J.toFixed(4)} N·s, Δp = ${dp.toFixed(4)} kg·m/s`, exp: 'equal, = 2 (±0.5%)', pass: relErr(J, dp) <= 0.005 && relErr(J, 2) <= 0.005 };
+  } },
+  { name: 'Energy adds up: block sliding with friction', run() {
+    const sc = inclineScene(0.5, 0.3, (add) => add('block', { ...onIncline(6, 0.2), w: 0.4, h: 0.4, angle: INC, mass: 1 }));
+    let worst = 0, E0, p0 = null, sim;
+    sim = simulate(sc, 1.5, (s) => { const E = s.energy(); if (E0 === undefined) E0 = s.E0; worst = Math.max(worst, Math.abs(E.total - E0.total)); if (!p0) p0 = { ...recOf(s, sc.objects[1]).getPosition() }; });
+    const E = withScene(sc, () => sim.energy()), p1 = recOf(sim, sc.objects[1]).getPosition();
+    const flow = E0.Ug - E.Ug, d = V.dist(p1, p0), wantTh = 0.3 * 9.81 * Math.cos(INC) * d;
+    return { meas: `E_th = ${E.Eth.toFixed(4)} J (μk N d = ${wantTh.toFixed(4)}), worst |ΔE_total| = ${(100 * worst / flow).toFixed(2)}% of ΔU_g`, exp: 'E_th = μk N d (±1%), total within 1%', pass: relErr(E.Eth, wantTh) <= 0.01 && worst / flow <= 0.01 };
+  } },
+  { name: 'Energy adds up: damped spring-mass (c = 2 N·s/m)', run() {
+    const sc = testScene((add, R) => {
+      add('surface', { kind: 'line', pts: [{ x: -2, y: 0 }, { x: 3, y: 0 }], mu_s: 0, mu_k: 0 });
+      const b = add('block', { x: 0.1, y: 0.2, w: 0.4, h: 0.4, mass: 1 });
+      add('springdamper', { a: free(-1, 0.2), b: R(b, 'l'), k: 100, c: 2, restLen: 0.8 });
+    });
+    let worst = 0, E0;
+    const sim = simulate(sc, 5, (s) => { const E = s.energy(); if (E0 === undefined) E0 = s.E0.total; worst = Math.max(worst, Math.abs(E.total - E0)); });
+    const E = withScene(sc, () => sim.energy());
+    return { meas: `E_th (damper) = ${E.Eth.toFixed(4)} J of 0.5 J; worst |ΔE_total| = ${(100 * worst / 0.5).toFixed(2)}%`, exp: 'total within 1% of 0.5 J', pass: worst / 0.5 <= 0.01 && E.Eth > 0.45 };
+  } },
+  { name: 'Rolling indicator: μs = 0.5 rolls, μs = 0.05 slips', run() {
+    const check = (mu) => { const sc = inclineScene(mu, mu, (add) => add('disk', { ...onIncline(6, 0.2), r: 0.2, mass: 1 })); const sim = simulate(sc, 1); return withScene(sc, () => rollingInfo(sim.recs.get(sc.objects[1].id))); };
+    const a = check(0.5), b = check(0.05);
+    return { meas: `μ 0.5: ${a.rolling ? 'rolling' : 'slipping'} (slip ${num(a.slip)} m/s); μ 0.05: ${b.rolling ? 'rolling' : 'slipping'} (slip ${num(b.slip)} m/s)`, exp: 'rolling; slipping (μ < tan30°/3 = 0.19)', pass: a.rolling && !b.rolling };
+  } },
+  { name: 'Period readout vs textbook: simple and physical pendulum', run() {
+    const th = toRad(5);
+    const simple = testScene((add) => { add('pin', { p: free(0, 2), mount: 'ground' }); add('rod', { ...rodGeom({ x: 0, y: 2 }, { x: Math.sin(th), y: 2 - Math.cos(th) }), mass: 0 }); add('pointmass', { x: Math.sin(th), y: 2 - Math.cos(th), mass: 1 }); });
+    const phys = testScene((add) => { add('rod', { ...rodGeom({ x: 0, y: 2 }, { x: Math.sin(th), y: 2 - Math.cos(th) }), mass: 1 }); add('pin', { p: free(0, 2), mount: 'ground' }); });
+    const per = (sc, k) => { const sim = simulate(sc, 7); return withScene(sc, () => { const r = sim.recs.get(sc.objects[k].id); return [measuredPeriod(sim, r), textbookPeriod(sim, r)]; }); };
+    const [m1, t1] = per(simple, 2), [m2, t2] = per(phys, 0);
+    const pass = m1 && t1 && m2 && t2 && relErr(m1.T, t1.T) <= 0.01 && relErr(m2.T, t2.T) <= 0.01 && relErr(t2.T, TAU * Math.sqrt(2 / (3 * 9.81))) < 1e-6;
+    return { meas: m1 && t1 && m2 && t2 ? `simple ${m1.T.toFixed(4)} vs ${t1.T.toFixed(4)} s; physical ${m2.T.toFixed(4)} vs ${t2.T.toFixed(4)} s` : 'not recognized', exp: 'measured within 1% of 2π√(L/g) and 2π√(I_P/(m g d))', pass };
+  } },
 ];
 
 async function runTests() {
   if (run.playing) { run.playing = false; updateSimUI(); }
   $('testBox').hidden = false;
   const rows = $('testRows');
-  rows.innerHTML = TESTS.map((T, i) => `<tr><td>${i + 1}</td><td>${esc(T.name)}</td><td id="tm${i}">…</td><td id="te${i}"></td><td id="tr${i}"></td></tr>`).join('');
+  rows.innerHTML = TESTS.map((T, i) => (T.group ? `<tr><th colspan="5" style="padding-top:10px">${esc(T.group)}</th></tr>` : '') +
+    `<tr><td>${i + 1}</td><td>${esc(T.name)}</td><td id="tm${i}">…</td><td id="te${i}"></td><td id="tr${i}"></td></tr>`).join('');
   $('testSummary').textContent = 'Running…';
   let passed = 0;
   for (let i = 0; i < TESTS.length; i++) {
@@ -2590,7 +2958,681 @@ async function runTests() {
 }
 
 /* =====================================================================
-   20. STARTUP
+   20. ANALYSIS: STATE, DATA RECORDER, READOUTS, FREE-BODY DIAGRAM
+   Everything here only READS the simulation. The forces come from the
+   force ledger in Section 16 (impulses averaged over the last step).
+   Analysis settings (which overlays are on, graphs, ruler...) are kept
+   separately from the scene, so they aren't undone, reset or exported.
+   ===================================================================== */
+const ANA_KEY = 'mechSandbox.analysis';
+const ana = loadAna();
+function loadAna() {
+  const def = {
+    show: { fbd: false, graphs: false, vel: false, acc: false, mom: false, omega: false, trails: false, com: false, rolling: false },
+    fbdStyle: 'auto',
+    scale: { v: 0.2, a: 0.05, p: 0.1 },      // overlay arrow length: meters per (m/s), per (m/s^2), per (kg m/s)
+    trailSec: 5, O: { x: 0, y: 0 }, Oset: false, measures: [],
+    graphs: [{ kind: 'pos', body: '' }, { kind: 'energy' }],
+  };
+  try {
+    const s = JSON.parse(localStorage.getItem(ANA_KEY));
+    if (s) {
+      const out = { ...def, ...s, show: { ...def.show, ...s.show }, scale: { ...def.scale, ...s.scale } };
+      if (!(isFinite(out.O.x) && isFinite(out.O.y))) out.O = { x: 0, y: 0 };
+      return out;
+    }
+  } catch (e) { /* storage blocked or corrupt: use defaults */ }
+  return def;
+}
+// Keys starting with "_" (hover position, drag state...) are temporary and not saved.
+function saveAna() { try { localStorage.setItem(ANA_KEY, JSON.stringify(ana, (k, v) => (k[0] === '_' ? undefined : v))); } catch (e) { /* fine */ } }
+
+// TeX label -> plain text for tables and menus ("\theta_1" -> "θ_1").
+const GREEK = { theta: 'θ', varphi: 'φ', phi: 'φ', omega: 'ω', alpha: 'α', beta: 'β', mu: 'μ', ell: 'ℓ', Delta: 'Δ', tau: 'τ', kappa: 'κ', pi: 'π', vec: '' };
+function plainTex(t) {
+  return String(t || '').replace(/\\(mathrm|text)\{([^}]*)\}/g, '$2').replace(/\\([a-zA-Z]+)/g, (m, w) => (w in GREEK ? GREEK[w] : w)).replace(/\\,/g, ' ').replace(/[{}\\]/g, '');
+}
+const bodyName = (o) => (o.label ? plainTex(o.label) : META[o.type].name) + ' (' + o.id + ')';
+const charLength = (o) => (o.type === 'disk' || o.type === 'pulley' ? o.r : o.type === 'rod' ? o.len / 2 : o.type === 'pointmass' ? 0.05 : Math.max(o.w, o.h) / 2);
+
+/* ---- Recorder: time series for graphs and CSV. Like a dict of equal-length Python lists. ---- */
+const MAX_SAMPLES = 24000;
+class Recorder {
+  constructor(every) { this.every = every; this.t = []; this.cols = new Map(); this.meta = new Map(); }
+  add(t, vals) {
+    const n = this.t.length;
+    this.t.push(t);
+    for (const [name, v, label, unit, avg] of vals) {
+      let col = this.cols.get(name);
+      if (!col) { col = new Array(n).fill(NaN); this.cols.set(name, col); this.meta.set(name, { label, unit, avg }); }
+      col.push(v);
+    }
+    for (const col of this.cols.values()) if (col.length === n) col.push(NaN);   // channel missing in this sample
+    if (this.t.length > MAX_SAMPLES) this.decimate();
+  }
+  // Too much data: merge neighbouring samples in pairs. Averaged channels (forces, accelerations)
+  // are combined time-weighted, so the area under a force graph (the impulse) doesn't change.
+  decimate() {
+    const t = this.t, keep = [0];
+    for (let i = 2; i < t.length; i += 2) keep.push(i);
+    for (const [name, col] of this.cols) {
+      const avg = this.meta.get(name).avg;
+      this.cols.set(name, keep.map((i) => {
+        if (!avg || i === 0) return col[i];
+        const d1 = t[i - 1] - t[i - 2], d2 = t[i] - t[i - 1];
+        return isFinite(col[i - 1]) ? (col[i - 1] * d1 + col[i] * d2) / (d1 + d2) : col[i];
+      }));
+    }
+    this.t = keep.map((i) => t[i]);
+    this.every *= 2;
+  }
+  col(name) { return this.cols.get(name); }
+  indexAt(tt) {                                 // nearest sample index (binary search)
+    const t = this.t;
+    let lo = 0, hi = t.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (t[mid] < tt) lo = mid; else hi = mid; }
+    return Math.abs(t[lo] - tt) < Math.abs(t[hi] - tt) ? lo : hi;
+  }
+}
+
+/* ---- Number formatting: 4 significant figures, scientific notation when very big or small ---- */
+function num(v, unit = '') {
+  if (!isFinite(v)) return '—';
+  const a = Math.abs(v);
+  const s = a < 5e-10 ? '0' : (a >= 1e5 || a < 1e-3) ? v.toExponential(2) : String(+v.toPrecision(4));
+  return unit ? s + ' ' + unit : s;
+}
+const vecTxt = (x, y, unit) => `(${num(x)}, ${num(y)}) <span class="mag">|${num(Math.hypot(x, y))}|</span> ${unit}`;
+const near = (a, b) => Math.abs(a - b) <= 1e-6 + 1e-6 * Math.max(Math.abs(a), Math.abs(b));
+
+/* ---- Rolling indicator: is the contact point of a wheel moving relative to what it touches? ---- */
+function rollingInfo(r) {
+  if (r.o.type !== 'disk' && r.o.type !== 'pulley') return null;
+  const b = r.body, v = b.getLinearVelocity(), w = b.getAngularVelocity();
+  for (const e of r.ledger.values()) {
+    if (e.kind !== 'normal' || !e.active || !e.other || Math.hypot(e.F.x, e.F.y) < 1e-6) continue;
+    const p = v2(e.p), vo = e.other.getLinearVelocityFromWorldPoint(p), vp = b.getLinearVelocityFromWorldPoint(p);
+    const slip = Math.hypot(vp.x - vo.x, vp.y - vo.y), vcm = Math.hypot(v.x - vo.x, v.y - vo.y);
+    // "relative to the surface": for a disk on a moving block, speeds are measured relative to the block
+    return { vcm, wR: Math.abs(w) * r.o.r, slip, rolling: slip <= Math.max(2e-3, 0.01 * vcm), still: vcm < 2e-3 && slip < 2e-3 };
+  }
+  return { none: true };
+}
+
+/* ---- Period: measured from the recorded motion, and the textbook value for standard setups ---- */
+function measuredPeriod(sim, r) {
+  const rec = sim.rec, t = rec.t, id = r.o.id;
+  let best = null;
+  // Use the velocity component with the biggest swing (omega scaled by the body's size so it compares with m/s).
+  for (const [ch, scale, name] of [['vx', 1, 'v_x'], ['vy', 1, 'v_y'], ['w', charLength(r.o), 'ω']]) {
+    const col = rec.col(id + '.' + ch);
+    if (!col) continue;
+    let amp = 0;
+    for (const v of col) if (isFinite(v)) amp = Math.max(amp, Math.abs(v) * scale);
+    if (amp < 1e-3) continue;
+    const cross = [];
+    for (let i = 1; i < col.length; i++) {
+      const a = col[i - 1], b = col[i];
+      if (isFinite(a) && isFinite(b) && (a < 0) !== (b < 0)) cross.push(t[i - 1] + (0 - a) * (t[i] - t[i - 1]) / (b - a));
+    }
+    if (cross.length < 3) continue;
+    const use = cross.slice(-21), iv = use.slice(1).map((x, i) => x - use[i]);
+    const mean = iv.reduce((s, x) => s + x, 0) / iv.length;
+    const sd = Math.sqrt(iv.reduce((s, x) => s + (x - mean) ** 2, 0) / iv.length);
+    if (sd / mean > 0.15) continue;                                // not a steady oscillation
+    if (!best || amp > best.amp) best = { T: 2 * mean, n: iv.length / 2, from: name, amp };
+  }
+  return best;
+}
+// Recognize a textbook oscillator from how the body is connected (rec.links, built in Section 16).
+function textbookPeriod(sim, r) {
+  const g = Math.abs(scene.settings.g), m = r.m, fixed = (b) => !b.isDynamic(), by = (t) => r.links.filter((l) => l.type === t);
+  const pins = by('pin'), welds = by('weld'), tracks = by('track'), rods = by('rod').concat(by('rope').filter((l) => l.len));
+  const springs = sim.elements.filter((el) => (el.A.body === r.body || el.B.body === r.body) && (el.o.type === 'spring' || el.o.type === 'springdamper'));
+  const damped = sim.elements.some((el) => (el.A.body === r.body || el.B.body === r.body) && el.o.type !== 'spring' && (el.o.type !== 'springdamper' || el.o.c));
+  if (welds.length || sim.elements.some((el) => el.o.type === 'actuator' && (el.A.body === r.body || el.B.body === r.body))) return null;
+  const note = damped ? ' (undamped value)' : '';
+  if (pins.length === 1 && fixed(pins[0].other) && !springs.length && !rods.length && !tracks.length) {
+    const d = V.dist(pins[0].anchor, r.c0), Ip = r.I + m * d * d, k = pins[0].kappa;
+    if (k > 0 && (g === 0 || d < 1e-6)) return { T: TAU * Math.sqrt(Ip / k), formula: '2π√(I_P / κ)', name: 'torsion pendulum' + note };
+    if (!(k > 0) && d > 1e-6 && g > 0) return { T: TAU * Math.sqrt(Ip / (m * g * d)), formula: '2π√(I_P / (m g d))', name: 'physical pendulum, small angle' + note };
+    return null;
+  }
+  if (!pins.length && rods.length === 1 && fixed(rods[0].other) && !springs.length && !tracks.length && g > 0) {
+    const l = rods[0], near0 = (q) => V.dist(q, r.c0) < 0.03;
+    const pivot = near0(l.pb) ? l.pa : near0(l.pa) ? l.pb : null;
+    if (pivot) return { T: TAU * Math.sqrt(V.dist(pivot, r.c0) / g), formula: '2π√(L / g)', name: 'simple pendulum, small angle' + note };
+    return null;
+  }
+  if (!pins.length && !rods.length && springs.length && springs.every((el) => fixed(el.A.body === r.body ? el.B.body : el.A.body))) {
+    if (springs.some((el) => el.o.nonlinear && el.o.k3)) return null;
+    // Direction of motion: along the track, or along the springs if they all line up.
+    const axis = tracks.length ? tracks[0].axis : springs[0].u0;
+    if (!tracks.length && springs.some((el) => Math.abs(V.cross(el.u0, axis)) > 0.09)) return null;
+    const k = springs.reduce((s, el) => s + (el.o.nonlinear ? el.o.k2 : el.o.k) * V.dot(el.u0, axis) ** 2, 0);
+    if (!(k > 0)) return null;
+    return { T: TAU * Math.sqrt(m / k), formula: springs.length > 1 ? '2π√(m / k), k = k₁ + k₂ + …' : '2π√(m / k)', name: 'spring-mass' + note };
+  }
+  return null;
+}
+
+/* ---- Readouts in the properties panel ---- */
+const fmtForce = (e) => (e.mp && !e.F.x && !e.F.y ? num(e.M, 'N·m') : num(Math.hypot(e.F.x, e.F.y), 'N'));
+function readoutHTML() {
+  const sim = run.sim;
+  if (!sim) return '';
+  const id = ui.sel.size === 1 ? [...ui.sel][0] : null;
+  const rec = id && sim.recs.get(id);
+  if (rec && rec.body.isDynamic() && !rec.ideal) return bodyReadouts(sim, rec);
+  const el = id && sim.elements.find((x) => x.o.id === id);
+  if (el) return elementReadouts(sim, el);
+  const segs = id ? sim.ropes.filter((sg) => sg.ropeId === id) : [];
+  if (segs.length) return ropeReadouts(sim, segs);
+  return systemReadouts(sim) + (id ? '<p class="note">Select a moving body, spring, damper or rope for its own readouts.</p>' : '');
+}
+const row = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
+function bodyReadouts(sim, r) {
+  const b = r.body, c = b.getWorldCenter(), v = b.getLinearVelocity(), w = b.getAngularVelocity(), th = b.getAngle(), m = r.m, O = ana.O;
+  const g = Math.abs(scene.settings.g);
+  const rel = { x: c.x - O.x, y: c.y - O.y };
+  const LO = rel.x * m * v.y - rel.y * m * v.x + r.I * w;                 // L_O = r x (m v) + I w
+  const Fn = r.Fnet || { x: 0, y: 0 };
+  const tauO = (r.tauNet || 0) + rel.x * Fn.y - rel.y * Fn.x;            // net torque about O
+  let h = `<div class="roh">Live readouts · ${esc(r.name)} · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
+  h += row('Position (x, y)', `(${num(c.x)}, ${num(c.y)}) m`);
+  h += row('Angle θ', `${num(toDeg(th))}° (${num(th)} rad)`);
+  h += row('Velocity v', vecTxt(v.x, v.y, 'm/s'));
+  h += row('Angular velocity ω', num(w, 'rad/s'));
+  h += row('Acceleration a', vecTxt(r.a.x, r.a.y, 'm/s²'));
+  h += row('Angular accel. α', num(r.a.al, 'rad/s²'));
+  h += row('Momentum p = m v', vecTxt(m * v.x, m * v.y, 'kg·m/s'));
+  h += row(`L about O (${num(O.x)}, ${num(O.y)})`, num(LO, 'kg·m²/s'));
+  h += row('Net torque about O', num(tauO, 'N·m'));
+  h += row('K (translational)', num(0.5 * m * (v.x * v.x + v.y * v.y), 'J'));
+  h += row('K (rotational)', num(0.5 * r.I * w * w, 'J'));
+  h += row('U_g = m g y', num(m * g * c.y, 'J'));
+  h += row('I about center', num(r.I, 'kg·m²'));
+  for (const l of r.links.filter((x) => x.type === 'pin')) {
+    const d = V.dist(l.anchor, r.c0);
+    h += row(`I about pivot (d = ${num(d)} m)`, `${num(r.I + m * d * d, 'kg·m²')} <span class="note">= I + m d²</span>`);
+  }
+  const roll = rollingInfo(r);
+  if (roll) {
+    h += row('Rolling', roll.none ? 'not touching anything' : roll.still ? 'at rest (no slipping)'
+      : `v_cm = ${num(roll.vcm)} m/s, ωR = ${num(roll.wR)} m/s → ${roll.rolling ? '<b class="pass">rolling without slipping</b>' : `<b class="fail">slipping</b> (contact point slides at ${num(roll.slip)} m/s)`}`);
+  }
+  const mp = measuredPeriod(sim, r), tp = textbookPeriod(sim, r);
+  if (mp || tp) {
+    h += row('Period (measured)', mp ? `${num(mp.T, 's')} <span class="note">from ${mp.from}, ${mp.n.toFixed(1)} cycles</span>` : '<span class="note">not enough cycles yet</span>');
+    if (tp) h += row('Period (textbook)', `${num(tp.T, 's')} <span class="note">${tp.name}: ${tp.formula}</span>` + (mp ? ` <span class="note">(${num(100 * (mp.T - tp.T) / tp.T)}% diff)</span>` : ''));
+  }
+  // Newton's 2nd law check
+  const okF = near(Fn.x, m * r.a.x) && near(Fn.y, m * r.a.y), okT = near(r.tauNet || 0, r.I * r.a.al);
+  h += row('ΣF (all forces below)', vecTxt(Fn.x, Fn.y, 'N'));
+  h += row('m a', vecTxt(m * r.a.x, m * r.a.y, 'N') + (okF ? ' <span class="pass">✓</span>' : ''));
+  h += row('Στ about center / I α', `${num(r.tauNet || 0)} / ${num(r.I * r.a.al)} N·m` + (okT ? ' <span class="pass">✓</span>' : ''));
+  h += '</table>';
+  // Forces with their work and power
+  const es = [...r.ledger.values()].filter((e) => e.active || Math.abs(e.W) > 1e-9);
+  if (es.length) {
+    h += '<table class="ro forces"><tr><th>Force</th><th>Size</th><th>Work W</th><th>Power</th></tr>';
+    for (const e of es) {
+      h += `<tr class="${e.active ? '' : 'off'}"><td><span class="sw" style="background:${KIND_COLOR[e.kind] || '#555'}"></span>${esc(e.desc)}</td><td>${e.active ? fmtForce(e) : '0'}</td><td>${num(e.W, 'J')}</td><td>${num(e.active ? e.P : 0, 'W')}</td></tr>`;
+    }
+    h += '</table><p class="note">Forces are averages over the last time step. Work is the total since t = 0; power is F·v at the point where the force acts. Gray rows have stopped acting.</p>';
+  }
+  return h;
+}
+function elementReadouts(sim, el) {
+  const o = el.o, d = el.L - o.restLen;
+  let h = `<div class="roh">Live readouts · ${META[o.type].name} ${o.id} · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
+  h += row('Length L', num(el.L, 'm'));
+  if (o.type !== 'damper') h += row('Stretch Δ = L − L₀', num(d, 'm'));
+  h += row('Rate dL/dt', num(el.Ldot, 'm/s'));
+  h += row('Force (+ = pulls the ends together)', num(el.T, 'N'));
+  if (o.type === 'spring' || o.type === 'springdamper') h += row('U_s', num(o.nonlinear ? 0.5 * o.k2 * d * d + 0.25 * o.k3 * d ** 4 : 0.5 * o.k * d * d, 'J'));
+  return h + '</table>';
+}
+function ropeReadouts(sim, segs) {
+  let h = `<div class="roh">Live readouts · Rope ${segs[0].ropeId} · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
+  segs.forEach((sg, i) => {
+    const nm = segs.length > 1 ? `Part ${i + 1} ` : '';
+    h += row(nm + 'Tension T', num(sg.Tavg, 'N'));
+    h += row(nm + 'Slack (L_rest − L)', sg.Lrest - sg.L > 1e-4 ? num(sg.Lrest - sg.L, 'm') : 'taut');
+  });
+  if (segs.length > 1) h += '<p class="note">The rope grips a turning pulley, so the tension differs on its two sides.</p>';
+  return h + '</table>';
+}
+function systemReadouts(sim) {
+  const E = sim.energy(), P = sim.momentum(), E0 = sim.E0.total, dE = E.total - E0;
+  const scale = Math.max(1e-9, Math.abs(E0 - sim.E0.Ug) + Math.abs(E.K) + Math.abs(E.Kr) + Math.abs(E.Us) + Math.abs(E.Ug - sim.E0.Ug) + Math.abs(E.Eth) + Math.abs(E.Win));
+  let h = `<div class="roh">System · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
+  h += row('K translational', num(E.K, 'J')) + row('K rotational', num(E.Kr, 'J'));
+  h += row('U_g (from y = 0)', num(E.Ug, 'J')) + row('U_s (springs)', num(E.Us, 'J'));
+  h += row('Thermal E_th', `${num(E.Eth, 'J')} <span class="note">friction/impacts ${num(sim.Eloss.contact)}, dampers ${num(sim.Eloss.damper)}, ropes/joints ${num(sim.Eloss.joint)}</span>`);
+  h += row('Work in by applied loads', num(E.Win, 'J'));
+  h += row('Total K + U + E_th − W_in', `${num(E.total, 'J')} <span class="note">change since t = 0: ${num(dE, 'J')} (${num(100 * dE / scale)}%)</span>`);
+  h += row('Momentum p', vecTxt(P.px, P.py, 'kg·m/s'));
+  h += row(`L about O (${num(ana.O.x)}, ${num(ana.O.y)})`, num(P.L, 'kg·m²/s'));
+  h += row('Center of mass', `(${num(P.com.x)}, ${num(P.com.y)}) m, v_cm ${vecTxt(P.vcom.x, P.vcom.y, 'm/s')}`);
+  return h + '</table>';
+}
+function refreshReadouts() { const ro = $('ro'); if (ro) ro.innerHTML = readoutHTML(); }
+
+/* ---- Free-body diagram (floating box over the canvas) ---- */
+const KIND_COLOR = { gravity: '#333333', normal: '#1f6fd1', friction: '#e07b00', tension: '#2a9d4b', spring: '#8e44ad', damper: '#8a5a2b', actuator: '#b03060',
+  applied: '#d1495b', moment: '#d1495b', torsion: '#8e44ad', pin: '#666666', weld: '#666666', rod: '#666666', track: '#666666' };
+// Number repeated symbols: N, N -> N_1, N_2 (or f_k^{(1)} when the symbol already has a subscript).
+function numberLabels(es) {
+  const count = {}, seen = {};
+  for (const e of es) count[e.tex] = (count[e.tex] || 0) + 1;
+  return es.map((e) => {
+    if (count[e.tex] < 2) return e.tex;
+    seen[e.tex] = (seen[e.tex] || 0) + 1;
+    return e.tex.includes('_') ? `${e.tex}^{(${seen[e.tex]})}` : `${e.tex}_{${seen[e.tex]}}`;
+  });
+}
+function fbdBodyShape(o, toS, s) {
+  const st = `fill="${GRAY}" stroke="#000" stroke-width="2"`;
+  if (o.type === 'block' || o.type === 'cart') {
+    const hw = o.w / 2, hh = o.h / 2;
+    let out = `<path d="${pathD([[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => toS(x, y)), true)}" ${st}/>`;
+    if (o.type === 'cart') for (const sx of [-0.3, 0.3]) { const c = toS(o.w * sx, -hh - o.wheelR); out += `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(o.wheelR * s)}" fill="#fff" stroke="#000" stroke-width="1.5"/>`; }
+    return out;
+  }
+  if (o.type === 'disk' || o.type === 'pulley') { const c = toS(0, 0); return `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(o.r * s)}" ${st}/>`; }
+  if (o.type === 'rod') { const a = toS(-o.len / 2, 0), b = toS(o.len / 2, 0); return `<path d="${pathD([a, b])}" stroke="#000" stroke-width="5" stroke-linecap="round"/>`; }
+  const c = toS(0, 0);
+  return `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="7" fill="#000"/>`;
+}
+function drawFBD() {
+  const box = $('fbdBox');
+  if (box.hidden) return;
+  const svg = $('fbdSvg'), info = $('fbdCheck'), sim = run.sim;
+  const id = ui.sel.size === 1 ? [...ui.sel][0] : null, r = sim && id ? sim.recs.get(id) : null;
+  if (!sim || !r || !r.body.isDynamic() || r.ideal || !sim.steps) {
+    $('fbdName').textContent = '';
+    svg.innerHTML = ''; svg.style.display = 'none';                   // collapse the empty box
+    info.innerHTML = !sim || !sim.steps ? 'Press <b>Play</b> or <b>Step</b>, then select a body.' : 'Select a moving body.';
+    return;
+  }
+  $('fbdName').textContent = r.name;
+  svg.style.display = '';
+  const W = 340, H = 290, cx = W / 2, cy = H / 2;
+  const b = r.body, c = b.getWorldCenter(), th = b.getAngle(), cs = Math.cos(th), sn = Math.sin(th);
+  const s = Math.min(400, 80 / (2 * charLength(r.o)));                   // px per meter for the body drawing
+  const bodyS = (lx, ly) => ({ x: cx + (cs * lx - sn * ly) * s, y: cy - (sn * lx + cs * ly) * s });   // body-local -> FBD px
+  const worldS = (p) => ({ x: cx + (p.x - c.x) * s, y: cy - (p.y - c.y) * s });
+  // Dot style (the AP "particle" FBD): every force drawn from one dot at the center of mass.
+  // Extended style: the body's outline, each force drawn from the point where it acts (shows torques).
+  const dot = ana.fbdStyle === 'dot' || (ana.fbdStyle === 'auto' && ['block', 'cart', 'pointmass'].includes(r.o.type));
+  let out = dot ? '' : fbdBodyShape(r.o, bodyS, s);
+  const es = [...r.ledger.values()].filter((e) => e.active && (Math.hypot(e.F.x, e.F.y) > 1e-9 || Math.abs(e.M) > 1e-9));
+  const names = numberLabels(es);
+  const Fmax = Math.max(1e-12, ...es.map((e) => Math.hypot(e.F.x, e.F.y)));
+  es.forEach((e, i) => {
+    const col = KIND_COLOR[e.kind] || '#555', F = Math.hypot(e.F.x, e.F.y);
+    if (F > 1e-9 * Fmax && F > 1e-9) {
+      // Arrow starts at the point where the force acts; length is proportional to the force.
+      const tail = dot ? { x: cx, y: cy } : worldS(e.p), dir = { x: e.F.x / F, y: -e.F.y / F }, len = Math.max(14, 85 * F / Fmax);
+      const tip = V.add(tail, V.mul(dir, len));
+      out += cArrow(tail, tip, col, 2.2);
+      const sz = texSize(names[i]), d = 5 + Math.abs(dir.x) * sz.w / 2 + Math.abs(dir.y) * sz.h / 2;
+      const lc = V.add(tip, V.mul(dir, d));
+      out += texS(names[i], lc.x, lc.y);
+      // The size goes beside the symbol for up/down arrows and under it for sideways ones, away from the arrow.
+      if (Math.abs(dir.y) > 0.6) out += dir.x >= 0 ? cText(lc.x + sz.w / 2 + 4, lc.y + 4, num(F, 'N'), col) : cText(lc.x - sz.w / 2 - 4, lc.y + 4, num(F, 'N'), col, 'end');
+      else out += cText(lc.x, lc.y + sz.h / 2 + 11, num(F, 'N'), col, 'middle');
+    }
+    if (Math.abs(e.M) > 1e-9) {                                          // pure moment: curved arrow
+      const R0 = Math.min(110, charLength(r.o) * s + 16 + 7 * i), sg = Math.sign(e.M);
+      const pts = [];
+      for (let k = 0; k <= 24; k++) { const a = Math.PI / 2 + sg * 4 * k / 24; pts.push({ x: cx + R0 * Math.cos(a), y: cy - R0 * Math.sin(a) }); }
+      out += `<path d="${pathD(pts)}" fill="none" stroke="${col}" stroke-width="2"/>` + headSc(pts[pts.length - 1], V.unit(V.sub(pts[24], pts[22])), col);
+      out += texS(names[i], cx, cy - R0 - 12) + cText(cx, cy - R0 + 4, num(e.M, 'N·m'), col, 'middle');
+    }
+  });
+  out += `<circle cx="${cx}" cy="${cy}" r="${dot ? 5 : 2.5}" fill="#000"/>`;
+  svg.innerHTML = out;
+  const Fn = r.Fnet, m = r.m, okF = near(Fn.x, m * r.a.x) && near(Fn.y, m * r.a.y), okT = near(r.tauNet, r.I * r.a.al);
+  info.innerHTML = `ΣF = ${vecTxt(Fn.x, Fn.y, 'N')}<br>m·a = ${vecTxt(m * r.a.x, m * r.a.y, 'N')} ${okF ? '<span class="pass">✓ equal</span>' : '<span class="fail">≠</span>'}<br>` +
+    `Στ<sub>cm</sub> = ${num(r.tauNet, 'N·m')}, I·α = ${num(r.I * r.a.al, 'N·m')} ${okT ? '<span class="pass">✓</span>' : '<span class="fail">≠</span>'}`;
+}
+
+/* =====================================================================
+   21. ANALYSIS: OVERLAYS, RULER, PROTRACTOR, POINT O
+   Drawn in the editor overlay layer only (never exported). Color is
+   allowed here so the analysis can't be mistaken for the diagram.
+   ===================================================================== */
+const OV = { v: '#1f6fd1', a: '#d1495b', p: '#2a9d4b', w: '#8e44ad', trail: '#6d9fd6', meas: '#c25e00', O: '#8e44ad' };
+function cArrow(T, H, color, w = 2) {
+  const len = V.dist(T, H);
+  if (len < 2) return '';
+  const d = V.unit(V.sub(H, T)), back = V.sub(H, V.mul(d, Math.min(9, len * 0.6)));
+  return `<path d="M${f(T.x)} ${f(T.y)}L${f(back.x)} ${f(back.y)}" stroke="${color}" stroke-width="${w}" fill="none"/>` + headSc(H, d, color);
+}
+function headSc(tip, d, color) {
+  const n = V.perp(d), back = V.sub(tip, V.mul(d, 9));
+  return `<path d="${pathD([tip, V.add(back, V.mul(n, 4)), V.sub(back, V.mul(n, 4))], true)}" fill="${color}"/>`;
+}
+const cText = (x, y, txt, color, anchor = 'start') =>
+  `<text x="${f(x)}" y="${f(y)}" font-size="11" font-family="system-ui,sans-serif" fill="${color}" text-anchor="${anchor}" stroke="#fff" stroke-width="3" paint-order="stroke">${esc(txt)}</text>`;
+
+function measureMarkup(m) {
+  if (m.type === 'ruler') {
+    const a = P(m.a), b = P(m.b), A = S(a), B = S(b), n = V.perp(V.unit(V.sub(B, A)));
+    const mid = V.mul(V.add(A, B), 0.5);
+    let s = `<path d="M${f(A.x)} ${f(A.y)}L${f(B.x)} ${f(B.y)}" stroke="${OV.meas}" stroke-width="1.5" stroke-dasharray="6 3"/>`;
+    for (const P0 of [A, B]) s += `<path d="M${f(P0.x + n.x * 6)} ${f(P0.y + n.y * 6)}L${f(P0.x - n.x * 6)} ${f(P0.y - n.y * 6)}" stroke="${OV.meas}" stroke-width="1.5"/>`;
+    s += cText(mid.x + n.x * 12, mid.y + n.y * 12, `${V.dist(a, b).toFixed(3)} m`, OV.meas, 'middle');
+    s += cText(mid.x + n.x * 12, mid.y + n.y * 12 + 13, `Δx ${(b.x - a.x).toFixed(3)}, Δy ${(b.y - a.y).toFixed(3)}`, OV.meas, 'middle');
+    return s;
+  }
+  if (m.type === 'protractor') {
+    const v = P(m.v), a = P(m.a), b = m.b ? P(m.b) : null, C = S(v);
+    let s = `<path d="M${f(C.x)} ${f(C.y)}L${f(S(a).x)} ${f(S(a).y)}" stroke="${OV.meas}" stroke-width="1.5"/>`;
+    if (!b) return s;
+    s += `<path d="M${f(C.x)} ${f(C.y)}L${f(S(b).x)} ${f(S(b).y)}" stroke="${OV.meas}" stroke-width="1.5"/>`;
+    const a1 = Math.atan2(a.y - v.y, a.x - v.x), a2 = Math.atan2(b.y - v.y, b.x - v.x);
+    const delta = mod(a2 - a1 + Math.PI, TAU) - Math.PI, R = 30, pts = [];
+    for (let k = 0; k <= 20; k++) { const ang = a1 + delta * k / 20; pts.push({ x: C.x + R * Math.cos(ang), y: C.y - R * Math.sin(ang) }); }
+    s += `<path d="${pathD(pts)}" fill="none" stroke="${OV.meas}" stroke-width="1.5"/>`;
+    const mid = a1 + delta / 2;
+    s += cText(C.x + (R + 16) * Math.cos(mid), C.y - (R + 16) * Math.sin(mid) + 4, `${Math.abs(toDeg(delta)).toFixed(1)}°`, OV.meas, 'middle');
+    return s;
+  }
+  return '';
+}
+function analysisMarkup() {
+  let s = '';
+  for (const m of ana.measures) s += measureMarkup(m);
+  // preview of a ruler / protractor being placed
+  const T = TOOLS[ui.tool];
+  if (T.ana && ui.snap && ui.pending.length && ui.tool !== 'pickO') {
+    const pts = [...ui.pending, ui.snap];
+    s += measureMarkup(ui.tool === 'ruler' ? { type: 'ruler', a: pts[0], b: pts[1] } : { type: 'protractor', v: pts[0], a: pts[1], b: pts[2] });
+  }
+  if (ana.Oset || ui.tool === 'pickO') {
+    const o = S(ana.O);
+    s += `<circle cx="${f(o.x)}" cy="${f(o.y)}" r="4" fill="none" stroke="${OV.O}" stroke-width="1.5"/><path d="M${f(o.x - 8)} ${f(o.y)}h16M${f(o.x)} ${f(o.y - 8)}v16" stroke="${OV.O}" stroke-width="1"/>` + cText(o.x + 7, o.y - 7, 'O', OV.O);
+  }
+  const sim = run.sim;
+  if (!sim) return s;
+  const ppm = view.ppm, sh = ana.show, sc = ana.scale;
+  if (sh.trails && sim.rec.t.length > 1) {
+    const rec = sim.rec, i0 = rec.indexAt(sim.t - ana.trailSec), stride = Math.max(1, Math.ceil((rec.t.length - i0) / 400));
+    for (const r of sim.dynRecs) {
+      const xs = rec.col(r.o.id + '.x'), ys = rec.col(r.o.id + '.y');
+      if (!xs) continue;
+      const pts = [];
+      for (let i = i0; i < rec.t.length; i += stride) if (isFinite(xs[i])) pts.push(S({ x: xs[i], y: ys[i] }));
+      const c = r.body.getWorldCenter();
+      pts.push(S(c));
+      if (pts.length > 1) s += `<path d="${pathD(pts)}" fill="none" stroke="${OV.trail}" stroke-width="1.5" stroke-opacity="0.8"/>`;
+    }
+  }
+  for (const r of sim.dynRecs) {
+    const b = r.body, c = b.getWorldCenter(), C = S(c), v = b.getLinearVelocity();
+    const vec = (x, y, k, color, lbl) => { const tip = S({ x: c.x + x * k, y: c.y + y * k }); if (V.dist(C, tip) > 3) s += cArrow(C, tip, color, 2) + cText(tip.x + 5, tip.y - 4, lbl, color); };
+    if (sh.vel) vec(v.x, v.y, sc.v, OV.v, 'v');
+    if (sh.acc && isFinite(r.a.x)) vec(r.a.x, r.a.y, sc.a, OV.a, 'a');
+    if (sh.mom) vec(r.m * v.x, r.m * v.y, sc.p, OV.p, 'p');
+    if (sh.omega) {
+      const w = b.getAngularVelocity();
+      if (Math.abs(w) > 0.01) {
+        const R = Math.max(14, charLength(r.o) * ppm * 0.6), sw = Math.sign(w) * Math.min(5.5, Math.max(0.5, Math.abs(w) * 0.6)), pts = [];
+        for (let k = 0; k <= 30; k++) { const a = Math.PI / 2 + sw * k / 30; pts.push({ x: C.x + R * Math.cos(a), y: C.y - R * Math.sin(a) }); }
+        s += `<path d="${pathD(pts)}" fill="none" stroke="${OV.w}" stroke-width="2"/>` + headSc(pts[30], V.unit(V.sub(pts[30], pts[28])), OV.w);
+        s += cText(C.x + R + 4, C.y - R, `ω = ${num(w)} rad/s`, OV.w);
+      }
+    }
+    if (sh.rolling) {
+      const ri = rollingInfo(r);
+      if (ri && !ri.none && !ri.still) s += cText(C.x, C.y + charLength(r.o) * ppm + 16, ri.rolling ? 'rolling' : 'slipping', ri.rolling ? '#2a9d4b' : '#d1495b', 'middle');
+    }
+  }
+  if (sh.com && sim.dynRecs.length) {
+    const P0 = S(sim.momentum().com), R = 7;
+    // the usual center-of-mass symbol: a circle with two opposite quarters filled
+    s += `<circle cx="${f(P0.x)}" cy="${f(P0.y)}" r="${R}" fill="#fff" stroke="#000" stroke-width="1.5"/>` +
+      `<path d="M${f(P0.x)} ${f(P0.y)}h${R}a${R} ${R} 0 0 0 ${-R} ${-R}zM${f(P0.x)} ${f(P0.y)}h${-R}a${R} ${R} 0 0 0 ${R} ${R}z" fill="#000"/>` + cText(P0.x + 10, P0.y - 8, 'CM', '#000');
+  }
+  return s;
+}
+
+/* =====================================================================
+   22. GRAPHS AND CSV EXPORT
+   Each graph card picks what to plot. Data comes from the recorder of
+   the current run (or the last run after Reset). Drag across a graph to
+   select a time window: force graphs then show the impulse (the shaded
+   area) for that window; other graphs show the change over it.
+   ===================================================================== */
+const GKINDS = {
+  pos: { name: 'Position x, y', body: true, unit: 'm', ch: [['x', 'x'], ['y', 'y']] },
+  vel: { name: 'Velocity', body: true, unit: 'm/s', ch: [['vx', 'v_x'], ['vy', 'v_y'], ['v', '|v|']] },
+  acc: { name: 'Acceleration', body: true, unit: 'm/s²', ch: [['ax', 'a_x'], ['ay', 'a_y'], ['a', '|a|']] },
+  theta: { name: 'Angle θ', body: true, unit: 'rad', ch: [['th', 'θ']] },
+  omega: { name: 'Angular velocity ω', body: true, unit: 'rad/s', ch: [['w', 'ω']] },
+  alpha: { name: 'Angular acceleration α', body: true, unit: 'rad/s²', ch: [['al', 'α']] },
+  force: { name: 'Force on a body (area = impulse)', body: true, force: true, unit: 'N' },
+  energy: { name: 'Energy (system)', unit: 'J', hideZero: true, ch: [['E.K', 'K trans'], ['E.Kr', 'K rot'], ['E.Ug', 'U_g'], ['E.Us', 'U_s'], ['E.Eth', 'E_thermal'], ['E.Win', 'W_in'], ['E.tot', 'Total']] },
+  mom: { name: 'Momentum (system)', unit: 'kg·m/s', ch: [['sys.px', 'p_x'], ['sys.py', 'p_y'], ['sys.p', '|p|']] },
+  ang: { name: 'Angular momentum about O (system)', unit: 'kg·m²/s', ch: [['sys.L', 'L_O']] },
+};
+const GCOLORS = ['#1f6fd1', '#d1495b', '#2a9d4b', '#8e44ad', '#e07b00', '#17a2b8', '#111111'];
+const isMovingBody = (o) => META[o.type].body && !o.fixed && !isMasslessRod(o) && !(o.type === 'pulley' && !(o.mass > 0));
+function bodyChoices() { return scene.objects.filter(isMovingBody).map((o) => [o.id, bodyName(o)]); }
+function forceChoices(id) {
+  const out = [['net', 'Net force ΣF']], rec = run.rec;
+  if (!rec || !id) return out;
+  const pre = id + '.F.';
+  for (const [name, m] of rec.meta) {
+    if (!name.startsWith(pre) || /\.(x|y|M)$/.test(name) || name === pre + 'net') continue;
+    out.push([name.slice(pre.length), m.label.replace(/ \|F\|$/, '').replace(/^.*?\(o\d+\) /, '')]);
+  }
+  return out;
+}
+function graphSeries(g) {
+  const rec = run.rec, K = GKINDS[g.kind];
+  if (!rec || !K) return [];
+  if (K.force) {
+    const base = g.body + '.F.' + (g.force || 'net') + (g.comp && g.comp !== 'm' ? '.' + g.comp : '');
+    const col = rec.col(base);
+    return col ? [{ label: { m: '|F|', x: 'F_x', y: 'F_y' }[g.comp || 'm'], data: col, color: GCOLORS[0], area: true }] : [];
+  }
+  const out = [];
+  K.ch.forEach(([suffix, label], i) => {
+    const col = rec.col(K.body ? g.body + '.' + suffix : suffix);
+    if (!col) return;
+    if (K.hideZero && !['E.tot', 'E.K'].includes(suffix) && col.every((v) => !isFinite(v) || Math.abs(v) < 1e-9)) return;
+    out.push({ label, data: col, color: GCOLORS[i % GCOLORS.length], bold: suffix === 'E.tot' });
+  });
+  return out;
+}
+// "Nice" tick values (1, 2, 5 x 10^n) covering [lo, hi].
+function niceTicks(lo, hi, n) {
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const step = [1, 2, 5, 10].map((k) => k * mag).find((st) => st >= raw) || raw;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  return out;
+}
+// Integral of a series over [a, b]. Forces are interval averages, so the sum of value x interval is exact.
+function integrate(t, data, a, b) {
+  let J = 0;
+  for (let i = 1; i < t.length; i++) if (t[i] > a && t[i] <= b + 1e-12 && isFinite(data[i])) J += data[i] * (t[i] - t[i - 1]);
+  return J;
+}
+function drawGraph(card, g) {
+  const cv = card.querySelector('canvas'), info = card.querySelector('.ginfo');
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = '10px system-ui, sans-serif';
+  const rec = run.rec, K = GKINDS[g.kind], ser = graphSeries(g);
+  if (!rec || rec.t.length < 2 || !ser.length) {
+    ctx.fillStyle = '#888'; ctx.font = '12px system-ui, sans-serif';
+    ctx.fillText(!rec ? 'Press Play to record data.' : 'Nothing to plot yet for this choice.', 12, 24);
+    info.textContent = ''; cv._map = null;
+    return;
+  }
+  const t = rec.t, t0 = t[0], t1 = Math.max(t[t.length - 1], t0 + 1e-6);
+  let lo = Infinity, hi = -Infinity;
+  for (const s of ser) for (const v of s.data) if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (K.force) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (!isFinite(lo)) { lo = -1; hi = 1; }
+  if (hi - lo < 1e-9) { const c = (hi + lo) / 2, d = Math.max(1e-3, Math.abs(c) * 0.1); lo = c - d; hi = c + d; }
+  const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
+  const L = 50, R = 8, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  const X = (tt) => L + (tt - t0) / (t1 - t0) * pw, Y = (v) => T + (hi - v) / (hi - lo) * ph;
+  cv._map = { L, pw, t0, t1 };
+  // grid and ticks
+  ctx.strokeStyle = '#eee'; ctx.fillStyle = '#666'; ctx.lineWidth = 1;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const yv of niceTicks(lo, hi, 4)) { const y = Math.round(Y(yv)) + 0.5; ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke(); ctx.fillText(num(yv), L - 4, y); }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const tv of niceTicks(t0, t1, 6)) { const x = Math.round(X(tv)) + 0.5; ctx.beginPath(); ctx.moveTo(x, T); ctx.lineTo(x, T + ph); ctx.stroke(); ctx.fillText(num(tv), x, T + ph + 4); }
+  ctx.textAlign = 'right'; ctx.fillText('t (s)', L + pw, T + ph + 4);
+  ctx.strokeStyle = '#999'; ctx.strokeRect(L + 0.5, T + 0.5, pw, ph);
+  if (lo < 0 && hi > 0) { ctx.strokeStyle = '#bbb'; ctx.beginPath(); ctx.moveTo(L, Y(0)); ctx.lineTo(L + pw, Y(0)); ctx.stroke(); }
+  // selected window
+  const sel = g._sel, [wa, wb] = sel || [t0, t1];
+  if (sel) { ctx.fillStyle = 'rgba(255, 200, 0, 0.18)'; ctx.fillRect(X(wa), T, X(wb) - X(wa), ph); }
+  // impulse = area under the force curve, drawn as steps (each sample is the average over its interval)
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T, pw, ph); ctx.clip();
+  for (const s of ser) {
+    if (!s.area) continue;
+    ctx.beginPath(); ctx.moveTo(X(wa), Y(0));
+    for (let i = 1; i < t.length; i++) {
+      if (t[i] <= wa || t[i - 1] >= wb || !isFinite(s.data[i])) continue;
+      const xa = X(Math.max(t[i - 1], wa)), xb = X(Math.min(t[i], wb)), y = Y(s.data[i]);
+      ctx.lineTo(xa, y); ctx.lineTo(xb, y);
+    }
+    ctx.lineTo(X(wb), Y(0)); ctx.closePath();
+    ctx.fillStyle = 'rgba(31, 111, 209, 0.22)'; ctx.fill();
+  }
+  // lines: with more samples than pixels, draw each pixel column's min..max (keeps spikes visible)
+  for (const s of ser) {
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.bold ? 2 : 1.4; ctx.beginPath();
+    let col = null, mn = 0, mx = 0, first = true;
+    const flush = () => { if (col === null) return; if (first) { ctx.moveTo(col, Y(mn)); first = false; } ctx.lineTo(col, Y(mn)); ctx.lineTo(col, Y(mx)); };
+    for (let i = 0; i < t.length; i++) {
+      const v = s.data[i];
+      if (!isFinite(v)) continue;
+      const x = Math.round(X(t[i]));
+      if (x !== col) { flush(); col = x; mn = mx = v; } else { mn = Math.min(mn, v); mx = Math.max(mx, v); }
+    }
+    flush(); ctx.stroke();
+  }
+  ctx.restore();
+  // hover line + legend values
+  let idx = t.length - 1;
+  if (g._hover != null) { idx = rec.indexAt(g._hover); const x = X(t[idx]); ctx.strokeStyle = '#888'; ctx.beginPath(); ctx.moveTo(x + 0.5, T); ctx.lineTo(x + 0.5, T + ph); ctx.stroke(); }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = '11px system-ui, sans-serif';
+  let lx = L + 6, ly = T + 4;
+  for (const s of ser) {
+    const txt = `${s.label} ${num(s.data[idx])}`, tw = ctx.measureText(txt).width;
+    if (lx + tw > L + pw - 4 && lx > L + 6) { lx = L + 6; ly += 15; }        // wrap onto the next line
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(lx - 2, ly - 1, tw + 4, 14);
+    ctx.fillStyle = s.color; ctx.fillText(txt, lx, ly);
+    lx += tw + 12;
+  }
+  // info line
+  const when = sel ? `t = ${num(wa)} → ${num(wb)} s` : `whole run (t = ${num(t0)} → ${num(t1)} s)`;
+  let txt = `${K.unit} · at t = ${num(t[idx])} s`;
+  if (K.force) {
+    const J = integrate(t, ser[0].data, wa, wb), sym = { m: '∫|F| dt', x: 'J_x = ∫F_x dt', y: 'J_y = ∫F_y dt' }[g.comp || 'm'];
+    txt = `Impulse ${sym} = ${num(J, 'N·s')} over ${when}. Drag to pick a window, double-click to clear.`;
+  } else if (sel) {
+    const i1 = rec.indexAt(wa), i2 = rec.indexAt(wb);
+    txt = 'Change over ' + when + ': ' + ser.map((s) => `Δ${s.label} = ${num(s.data[i2] - s.data[i1])}`).join(', ') + ` (${K.unit})`;
+  }
+  info.textContent = txt;
+}
+function updateGraphControls(card, g) {
+  const K = GKINDS[g.kind], gb = card.querySelector('.gb'), gf = card.querySelector('.gf'), gc = card.querySelector('.gc');
+  const setOpts = (sel, opts, cur, keep = false) => {
+    if (keep && cur && !opts.some(([v]) => v === cur)) opts = [...opts, [cur, cur + ' (no data yet)']];
+    const sig = JSON.stringify(opts);
+    if (sel.dataset.sig !== sig && document.activeElement !== sel) {
+      sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+      sel.dataset.sig = sig;
+    }
+    if (opts.length && !opts.some(([v]) => v === cur)) cur = opts[0][0];
+    if (document.activeElement !== sel) sel.value = cur;
+    return cur;
+  };
+  gb.hidden = !K.body; gf.hidden = !K.force; gc.hidden = !K.force;
+  if (K.body) g.body = setOpts(gb, bodyChoices(), g.body);
+  if (K.force) { g.force = setOpts(gf, forceChoices(g.body), g.force || 'net', true); gc.value = g.comp || 'm'; }
+}
+function buildGraphs() {
+  const box = $('graphs');
+  box.innerHTML = ana.graphs.map((g, i) => `<div class="gcard" data-i="${i}"><div class="ghead">
+    <select class="gk">${Object.entries(GKINDS).map(([k, K]) => `<option value="${k}" ${k === g.kind ? 'selected' : ''}>${K.name}</option>`).join('')}</select>
+    <select class="gb"></select><select class="gf"></select>
+    <select class="gc"><option value="m">|F|</option><option value="x">F_x</option><option value="y">F_y</option></select>
+    <button class="gx" title="Remove this graph">×</button></div>
+    <canvas class="gcv"></canvas><div class="ginfo note"></div></div>`).join('');
+  box.querySelectorAll('.gcard').forEach((card) => {
+    const g = ana.graphs[+card.dataset.i], cv = card.querySelector('canvas');
+    const redraw = () => { saveAna(); updateGraphControls(card, g); drawGraph(card, g); };
+    card.querySelector('.gk').onchange = (e) => { g.kind = e.target.value; g._sel = null; redraw(); };
+    card.querySelector('.gb').onchange = (e) => { g.body = e.target.value; g.force = 'net'; redraw(); };
+    card.querySelector('.gf').onchange = (e) => { g.force = e.target.value; redraw(); };
+    card.querySelector('.gc').onchange = (e) => { g.comp = e.target.value; redraw(); };
+    card.querySelector('.gx').onclick = () => { ana.graphs.splice(+card.dataset.i, 1); saveAna(); buildGraphs(); };
+    const tAt = (e) => { const m = cv._map, r = cv.getBoundingClientRect(); return m ? m.t0 + Math.min(1, Math.max(0, (e.clientX - r.left - m.L) / m.pw)) * (m.t1 - m.t0) : null; };
+    cv.onmousedown = (e) => { g._drag = tAt(e); g._sel = null; drawGraph(card, g); };
+    cv.onmousemove = (e) => {
+      const tt = tAt(e);
+      g._hover = tt;
+      if (g._drag != null && tt != null && Math.abs(tt - g._drag) > 1e-9) g._sel = [Math.min(tt, g._drag), Math.max(tt, g._drag)];
+      drawGraph(card, g);
+    };
+    cv.onmouseup = () => { g._drag = null; };
+    cv.onmouseleave = () => { g._hover = null; g._drag = null; drawGraph(card, g); };
+    cv.ondblclick = () => { g._sel = null; drawGraph(card, g); };
+    updateGraphControls(card, g);
+  });
+  drawGraphs();
+}
+function drawGraphs() {
+  if ($('dock').hidden) return;
+  $('graphs').querySelectorAll('.gcard').forEach((card) => { const g = ana.graphs[+card.dataset.i]; updateGraphControls(card, g); drawGraph(card, g); });
+}
+// Every recorded channel as columns: t, then one column per quantity (with units).
+function exportCSV() {
+  const rec = run.rec;
+  if (!rec || rec.t.length < 2) { msg('No data yet: press Play first.'); return; }
+  const names = [...rec.cols.keys()];
+  const q = (s) => '"' + String(s).replace(/"/g, '""') + '"';
+  const lines = [['t (s)', ...names.map((n) => { const m = rec.meta.get(n); return `${m.label} (${m.unit})`; })].map(q).join(',')];
+  for (let i = 0; i < rec.t.length; i++) lines.push([rec.t[i], ...names.map((n) => rec.cols.get(n)[i])].map((v) => (isFinite(v) ? +v.toPrecision(8) : '')).join(','));
+  download('mechanics-data.csv', lines.join('\n'), 'text/csv');
+  msg(`Exported ${rec.t.length} rows × ${names.length + 1} columns.`);
+}
+
+/* ---- Keeping the analysis views in step with the simulation ---- */
+function refreshAnalysis() {
+  refreshReadouts();
+  drawFBD();
+  drawGraphs();
+}
+function applyShow() {
+  $('fbdBox').hidden = !ana.show.fbd;
+  const dockWas = $('dock').hidden;
+  $('dock').hidden = !ana.show.graphs;
+  if (dockWas && !$('dock').hidden) buildGraphs();
+  render();
+  refreshAnalysis();
+}
+
+/* =====================================================================
+   23. STARTUP
    ===================================================================== */
 function buildToolbar() {
   let h = '', group = '';
@@ -2598,8 +3640,15 @@ function buildToolbar() {
     if (T.group !== group) { group = T.group; h += `<h4>${group}</h4>`; }
     h += `<button data-tool="${t}" title="${T.key ? 'Shortcut: ' + T.key.toUpperCase() : ''}">${T.name}</button>`;
   }
+  // Show: analysis overlays and windows (Phase 3). Color is allowed in these.
+  const SHOW = [['fbd', 'Free-body diagram'], ['graphs', 'Graphs'], ['vel', 'Velocity v'], ['acc', 'Acceleration a'], ['mom', 'Momentum p'],
+    ['omega', 'Angular velocity ω'], ['trails', 'Motion trails'], ['com', 'Center of mass'], ['rolling', 'Rolling indicator']];
+  h += '<h4>Show</h4>' + SHOW.map(([k, name]) => `<label class="chk"><input type="checkbox" data-show="${k}" ${ana.show[k] ? 'checked' : ''}> ${name}</label>`).join('');
+  h += '<button id="bClearMeas" class="small">Clear ruler / protractor</button>';
   $('tools').innerHTML = h;
-  $('tools').querySelectorAll('button').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
+  $('tools').querySelectorAll('button[data-tool]').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
+  $('tools').querySelectorAll('[data-show]').forEach((el) => el.onchange = () => { ana.show[el.dataset.show] = el.checked; saveAna(); applyShow(); });
+  $('bClearMeas').onclick = () => { ana.measures = []; ana.Oset = false; saveAna(); render(); };
 }
 function init() {
   buildToolbar();
@@ -2624,6 +3673,12 @@ function init() {
   $('bTests').onclick = runTests;
   $('bTestRun').onclick = runTests;
   $('bTestClose').onclick = () => { $('testBox').hidden = true; };
+  // analysis
+  $('gAdd').onclick = () => { if (ana.graphs.length >= 8) return msg('That\'s plenty of graphs.'); ana.graphs.push({ kind: 'vel', body: '' }); saveAna(); buildGraphs(); };
+  $('gCsv').onclick = exportCSV;
+  $('fbdStyle').value = ana.fbdStyle;
+  $('fbdStyle').onchange = () => { ana.fbdStyle = $('fbdStyle').value; saveAna(); drawFBD(); };
+  $('fbdClose').onclick = () => { ana.show.fbd = false; saveAna(); buildToolbar(); setTool(ui.tool); applyShow(); };
   window.addEventListener('resize', render);
   view.oy = $('svg').clientHeight - 60;
   let saved = null;
@@ -2631,6 +3686,7 @@ function init() {
   if (saved) { try { scene = fillDefaults(JSON.parse(saved)); } catch (e) { scene = newScene(); } }
   commit();
   updateSimUI();
+  applyShow();
   requestAnimationFrame((now) => { run.last = now; requestAnimationFrame(frame); });
   setTool('select');
   showPanel();
