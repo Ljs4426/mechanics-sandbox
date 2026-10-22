@@ -6,6 +6,13 @@ An interactive 2D mechanics sandbox for AP Physics C: Mechanics. You draw system
 - Libraries load from a CDN, pinned to exact versions: MathJax 3.2.2 for LaTeX labels and Planck.js 1.5.0 (a Box2D port) for physics. It needs internet the first time.
 - Full requirements: [docs/SPEC.md](docs/SPEC.md).
 
+## Download
+
+Windows: grab the `.exe` from the [Releases page](../../releases). The **portable** one runs without installing; the **setup** one installs with shortcuts. Both work offline.
+Mac, Chromebook or Linux: download `mechanics-sandbox.html` from the same page and open it in Chrome or Edge.
+
+The Windows app is built by GitHub Actions (`.github/workflows/release.yml`) from the `desktop/` folder: Actions tab → **Build Windows app** → **Run workflow**, type a version like `1.0.0`. Building locally on Windows: `cd desktop && npm ci && npm run dist`.
+
 ## Quick start
 
 1. **Examples & presets…** (top bar): the 4 reference diagrams and 13 classic AP setups. Each preset opens with an "About" card listing the textbook answers to check.
@@ -33,6 +40,8 @@ git show phase-1:mechanics-sandbox.html > mechanics-sandbox-phase1.html
 ## Layout
 
 - `mechanics-sandbox.html`: the app, split into labeled sections (see the comment at the top of the file)
+- `desktop/`: the Windows app wrapper (Electron). `prepare.js` copies the page in with Planck and MathJax stored locally so it runs offline
+- `.github/workflows/release.yml`: builds the Windows `.exe` files and publishes them as a GitHub Release
 - `docs/SPEC.md`: the original requirements and answers to clarifying questions
 - `docs/PHASE2-NOTES.md`: Phase 2 design notes (Planck internals, rope constraint math, test setups)
 - `docs/PHASE3-NOTES.md`: Phase 3 design notes (force ledger, energy bookkeeping, recorder)

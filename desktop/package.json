@@ -1,0 +1,48 @@
+{
+  "name": "mechanics-sandbox",
+  "productName": "Mechanics Sandbox",
+  "version": "1.0.0",
+  "description": "2D mechanics sandbox for AP Physics C: Mechanics",
+  "author": "Luke S.",
+  "private": true,
+  "repository": "github:Ljs4426/mechanics-sandbox",
+  "main": "main.js",
+  "scripts": {
+    "prepare-app": "node prepare.js",
+    "start": "npm run prepare-app && electron .",
+    "dist": "npm run prepare-app && electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "mathjax": "3.2.2",
+    "planck": "1.5.0"
+  },
+  "build": {
+    "appId": "io.github.ljs4426.mechanicssandbox",
+    "productName": "Mechanics Sandbox",
+    "files": [
+      "main.js",
+      "app/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "icon.png"
+    },
+    "portable": {
+      "artifactName": "MechanicsSandbox-${version}-portable.exe"
+    },
+    "nsis": {
+      "artifactName": "MechanicsSandbox-${version}-setup.exe",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

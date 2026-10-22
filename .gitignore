@@ -4,3 +4,7 @@ Thumbs.db
 *.tmp
 # local copies pulled out of git history
 mechanics-sandbox-phase1.html
+# desktop build output (made by desktop/prepare.js and electron-builder)
+desktop/node_modules/
+desktop/app/
+desktop/dist/
