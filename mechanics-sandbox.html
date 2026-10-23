@@ -5,7 +5,7 @@
 <title>Mechanics Sandbox</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
-  MECHANICS SANDBOX - Phase 5 (editor, physics, AP analysis tools, advanced elements, presets)
+  MECHANICS SANDBOX - Phase 6 (editor, physics, AP analysis tools, advanced elements, presets, flexible rods)
   ---------------------------------------------------
   One self-contained file. Sections in the <script> below:
     1. Utilities (vector math)
@@ -22,7 +22,7 @@
    12. Properties panel
    13. Undo/redo, clipboard, delete
    14. Save / load / export
-   15. Example scenes (the 4 reference diagrams) and AP presets
+   15. Example scenes (the 4 reference diagrams) and AP presets (42, grouped by topic)
    16. Physics: building a Planck world from the scene
    17. Physics: custom rope constraint (ropes over pulleys)
    18. Simulation controls (play / pause / step / reset, fixed time step)
@@ -141,7 +141,6 @@
     <option value="ex2">Ref 2: cart + elastic pendulum</option>
     <option value="ex3">Ref 3: disk on 3m block</option>
     <option value="ex4">Ref 4: block in channel + lever</option></optgroup>
-    <optgroup label="AP presets" id="presetGroup"></optgroup>
   </select>
   <span class="sep"></span>
   <button id="bUndo" title="Ctrl+Z">Undo</button>
@@ -370,7 +369,8 @@ const DEF = {
   // rolling: false = "frictionless cart" (wheels drawn, mu = 0); true = real wheels that roll (wheelMass each, solid disks)
   cart: () => ({ x: 0, y: 0, w: 1.4, h: 0.6, angle: 0, wheelR: 0.11, fill: 'white', rolling: false, wheelMass: 0.1, label: 'm', ...PHYS() }),
   disk: () => ({ x: 0, y: 0, r: 0.4, angle: 0, fill: 'gray', shape: 'solid disk', centerPin: true, showR: false, rLabel: 'r', label: '', ...PHYS() }),
-  rod: () => ({ x: 0, y: 0, len: 1, angle: 0, width: 3, label: '', ...PHYS(), mass: 0.5 }),
+  // EI > 0 makes it a flexible rod (bending stiffness, N m^2), simulated as `pieces` bend points.
+  rod: () => ({ x: 0, y: 0, len: 1, angle: 0, width: 3, label: '', ...PHYS(), mass: 0.5, EI: 0, pieces: 10 }),
   pointmass: () => ({ x: 0, y: 0, style: 'mass', size: 9, label: 'm', ...PHYS(), labelDx: 0.22, labelDy: 0.12 }),
   // pulley: mass 0 = ideal massless pulley (rope slides, equal tension both sides);
   //         mass > 0 = real pulley (rope can't slip, pulley spins). fixed = axle fixed in place.
@@ -1396,17 +1396,22 @@ function initKeys() {
   window.addEventListener('keyup', (e) => { if (e.key === ' ') ui.space = false; });
 }
 
-function fitView() {
+// Zoom and pan so the whole drawing fits. `frame` (optional, a world rectangle {x0, y0, x1, y1}) is
+// fitted too: presets use it to leave room for where things are going to move (an orbit, a thrown baton).
+function fitView(frame) {
   render();
   const g = $('sceneG');
   if (!scene.objects.length) return;
   const bb = g.getBBox(), svg = $('svg');
-  const k = Math.min((svg.clientWidth - 80) / bb.width, (svg.clientHeight - 80) / bb.height);
-  const w0 = W({ x: bb.x, y: bb.y + bb.height });
-  view.zoom = Math.min(10, Math.max(0.1, view.zoom * k));
-  const scaledW = bb.width * k, scaledH = bb.height * k;
-  const left = (svg.clientWidth - scaledW) / 2, bottom = (svg.clientHeight + scaledH) / 2;
-  view.ox = left - w0.x * view.ppm; view.oy = bottom + w0.y * view.ppm;
+  const lo = W({ x: bb.x, y: bb.y + bb.height }), hi = W({ x: bb.x + bb.width, y: bb.y });   // world corners
+  let { x: x0, y: y0 } = lo, { x: x1, y: y1 } = hi;
+  if (frame) { x0 = Math.min(x0, frame.x0); y0 = Math.min(y0, frame.y0); x1 = Math.max(x1, frame.x1); y1 = Math.max(y1, frame.y1); }
+  // With the free-body diagram on, fit in the space to the left of its window (if there's room).
+  const padR = ana.show.fbd && svg.clientWidth > 700 ? ($('fbdBox').offsetWidth || 352) + 14 : 0, availW = svg.clientWidth - padR;
+  const ppm = Math.min((availW - 80) / Math.max(1e-6, x1 - x0), (svg.clientHeight - 80) / Math.max(1e-6, y1 - y0));
+  view.zoom = Math.min(10, Math.max(0.1, ppm / scene.settings.pxPerM));
+  const left = (availW - (x1 - x0) * view.ppm) / 2, bottom = (svg.clientHeight + (y1 - y0) * view.ppm) / 2;
+  view.ox = left - x0 * view.ppm; view.oy = bottom + y0 * view.ppm;
   render();
 }
 
@@ -1462,7 +1467,12 @@ const FIELDS = {
   disk: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.sel('fill', 'Fill', ['gray', 'white', 'none']), Fd.sel('shape', 'Inertia shape', ['solid disk', 'hoop', 'sphere']), Fd.bool('centerPin', 'Center pin'), Fd.bool('showR', 'Radius arrow'), Fd.tex('rLabel', 'Radius label'), ...PHYS_FIELDS, ...LABEL_FIELDS],
   pulley: [...POS, Fd.num('r', 'Radius (m)', 0.01, 0.01), Fd.sel('fill', 'Fill', ['white', 'gray', 'none']), Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), ...PULLEY_PHYS, ...LABEL_FIELDS],
   rod: [...POS, Fd.num('len', 'Length (m)', 0.05, 0.01), Fd.deg('angle', 'Angle (°)'), Fd.num('width', 'Line weight (px)', 0.5, 0.5),
-    Fd.info('Mass 0 means', () => 'massless rigid rod: keeps its two ends a fixed distance apart'), ...PHYS_FIELDS, ...LABEL_FIELDS],
+    Fd.info('Mass 0 means', () => 'massless rigid rod: keeps its two ends a fixed distance apart'),
+    Fd.head('Bending (flexible rod)'), Fd.num('EI', 'Bending stiffness EI (N·m², 0 = rigid)', 10, 0),
+    when(Fd.num('pieces', 'Bend points (more = smoother curve)', 1, 2, 40), (o) => o.EI > 0),
+    when(Fd.info('Needs', () => 'a mass above 0 to bend (a massless rod stays rigid)'), (o) => o.EI > 0 && !(o.mass > 0)),
+    when(Fd.info('As a cantilever', (o) => `tip stiffness 3EI/L³ = ${num(3 * o.EI / o.len ** 3, 'N/m')}, f₁ = 0.560√(EI/mL³) = ${num(0.5596 * Math.sqrt(o.EI / (o.mass * o.len ** 3)), 'Hz')}`), (o) => o.EI > 0 && o.mass > 0),
+    ...PHYS_FIELDS, ...LABEL_FIELDS],
   pointmass: [...POS, Fd.sel('style', 'Style', [['mass', 'point mass (filled)'], ['bob', 'pendulum bob']]), Fd.num('size', 'Dot radius (px)', 1, 2), ...PHYS_FIELDS, ...LABEL_FIELDS],
   pin: [HOST, Fd.sel('mount', 'Mount', ['none', 'ground']), Fd.degv('mountAngle', 'Mount direction (°)'), Fd.num('mountLen', 'Mount size (px)', 1, 8), Fd.num('torsionK', 'Torsion spring κ (N·m/rad)', 0.1, 0), Fd.bool('show', 'Draw pin symbol'),
     Fd.info('Joins', (o) => (o.host === 'ground' ? 'every body here to the ground' : o.host ? 'the body it is mounted on to every other body here (just an attachment point if none)' : 'every body at this point (ground too if mounted, or if only one body is here)'))],
@@ -1750,32 +1760,39 @@ function exBuilder(fn, notes) {
   };
 }
 EX.ex1 = exBuilder((add, R) => {
-  add('surface', { kind: 'polyline', pts: [{ x: 5.3, y: 1.9 }, { x: 0.15, y: 1.9 }, { x: 0.15, y: 0.15 }, { x: 5.3, y: 0.15 }], side: 1 });
-  const m1 = add('block', { x: 2.35, y: 0.95, w: 3.0, h: 1.05, label: 'm_1' });
-  add('spring', { a: R(m1, 'r'), b: free(5.3, 0.95), style: 'coil', coils: 4, amp: 13, label: '', restLen: 1.45 });   // starts unstretched
+  // Frictionless channel; m1 rests on its floor and oscillates on the spring.
+  add('surface', { kind: 'polyline', pts: [{ x: 5.3, y: 1.9 }, { x: 0.15, y: 1.9 }, { x: 0.15, y: 0.15 }, { x: 5.3, y: 0.15 }], side: 1, mu_s: 0, mu_k: 0 });
+  const m1 = add('block', { x: 2.35, y: 0.675, w: 3.0, h: 1.05, label: 'm_1', mass: 3, vx: 1.2 });
+  add('spring', { a: R(m1, 'r'), b: free(5.3, 0.675), style: 'coil', coils: 4, amp: 13, label: '', restLen: 1.45, k: 40 });
   const p1 = add('pulley', { x: 1.6, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
   const p2 = add('pulley', { x: 3.4, y: 2.4, r: 0.18, mount: 'ground', mountAngle: -90, mountLen: 48 });
   add('pin', { p: free(1.0, 4.05), mount: 'ground', mountAngle: 180, mountLen: 30 });
   add('axes', { p: free(1.0, 4.05), lenX: 0.85, lenY: 0.85, labelX: '{}_{\\mathrm{I}}\\vec{e}_1', labelY: '{}_{\\mathrm{I}}\\vec{e}_2' });
-  add('rod', rodGeom({ x: 1.0, y: 4.05 }, { x: 1.4, y: 2.45 }));
-  const big = add('disk', { x: 4.1, y: 4.3, r: 0.9, showR: true, angle: toRad(-28), label: 'm', labelDx: 1.0, labelDy: 0.9 });
-  // rest length 2 - mg/k: the spring alone holds the disk's weight at the start, so the system starts in equilibrium
-  add('spring', { a: R(big, 'c'), b: free(4.1, 6.3), style: 'coil', coils: 4, amp: 13, label: '', restLen: +(2 - 9.81 / 100).toFixed(4) });
-  const C = add('pointmass', { x: 3.62, y: 3.0, size: 7, label: '', mass: 0.01 });
-  add('rope', { a: R(p1, 'r1'), b: R(C, 'c'), via: [{ id: big.id, s: -1 }] });
-  add('rope', { a: R(C, 'c'), b: R(p2, 'r1') });
-  add('rope', { a: R(p2, 'r0'), b: free(5.4, 3.55) });
+  const big = add('disk', { x: 4.1, y: 4.3, r: 0.9, mass: 2, showR: true, angle: toRad(-28), label: 'm', labelDx: 1.0, labelDy: 0.9 });
+  // Rest length 2 - mg/k: the spring alone holds the disk's weight at t = 0, so the start is smooth.
+  add('spring', { a: R(big, 'c'), b: free(4.1, 6.3), style: 'coil', coils: 4, amp: 13, label: '', k: 300, restLen: +(2 - 2 * 9.81 / 300).toFixed(4) });
+  // A hidden vertical guide through the disk's center: it moves up and down and spins, but can't swing sideways.
+  add('track', { a: free(4.1, 3.2), b: free(4.1, 5.2), show: false, host: 'ground', rotate: true, width: 4 });
+  const C = add('pointmass', { x: 3.62, y: 3.0, size: 7, label: '', mass: 0.3, collide: false });
+  // One rope: fixed at O, under pulley 1, over the disk (it grips: no slip), to the bead C,
+  // under pulley 2, to a handle that the force F(t) pulls along the rope's direction.
+  add('rope', { a: free(1.0, 4.05), b: R(C, 'c'), via: [{ id: p1.id, s: 1 }, { id: big.id, s: -1 }] });
+  const hd = { x: 5.4, y: 3.55 }, u = V.unit(V.sub(hd, { x: 3.4, y: 2.4 }));
+  const handle = add('pointmass', { ...hd, size: 5, label: '', mass: 0.2, collide: false });
+  add('rope', { a: R(C, 'c'), b: R(handle, 'c'), via: [{ id: p2.id, s: 1 }] });
+  add('track', { a: free(hd.x - 0.6 * u.x, hd.y - 0.6 * u.y), b: free(hd.x + 1.2 * u.x, hd.y + 1.2 * u.y), show: false, host: 'ground' });
+  add('force', { p: R(handle, 'c'), angle: +toDeg(Math.atan2(u.y, u.x)).toFixed(2), len: 0.55, law: '12*(1 - exp(-3*t)) + 4*sin(2.5*t)', label: 'F(t)' });
   add('leader', { a: free(3.05, 3.55), b: R(C, 'c'), label: 'C' });
   add('dim', { a: free(0.15, 0.15), b: R(m1, 'br'), orient: 'horizontal', off: -0.45, label: 'x' });
 }, { title: 'Ref 1: channel, pulleys and a disk on a spring', lines: [
-  'The big disk hangs from a spring and sits in a rope loop that runs from pulley 1, under the disk, to point C. The rope grips the disk (no slip), so the disk turns as it moves.',
-  'Both springs start at equilibrium (the disk spring is pre-stretched by mg/k), so the system starts nearly at rest. The block m₁ drops onto the channel floor at the start.',
-  'Try: give the disk an initial velocity, turn on Graphs → Energy, and select a rope to read its tension on each side of the disk.'] });
+  'Two systems in one drawing. Below: m₁ = 3 kg slides in a frictionless channel on a k = 40 N/m spring, started at 1.2 m/s (T = 2π√(m/k) = 1.72 s).',
+  'Above: one rope runs from the fixed point O, under pulley 1, over the 2 kg disk (which it grips, so the disk turns), to the 0.3 kg bead C, then under pulley 2 to a handle pulled by F(t) = 12(1 − e^(−3t)) + 4 sin 2.5t N. The disk hangs from a k = 300 N/m spring and rides a hidden vertical guide, so it bobs and spins but can\'t swing sideways.',
+  'Try: select the rope with the free-body diagram on to see the tension on each side of the disk (they differ while the disk spins up), or change F(t) in the force\'s panel.'] });
 EX.ex2 = exBuilder((add, R) => {
   add('surface', { kind: 'polyline', pts: [{ x: 0, y: 3.0 }, { x: 0, y: 0 }, { x: 4.3, y: 0 }], side: 1 });
-  const cart = add('cart', { x: 2.1, y: 0.715, w: 1.9, h: 0.95, wheelR: 0.12, label: 'm_1', labelDx: -0.8, labelDy: 0.33 });
+  const cart = add('cart', { x: 2.1, y: 0.715, w: 1.9, h: 0.95, wheelR: 0.12, mass: 5, label: 'm_1', labelDx: -0.8, labelDy: 0.33 });
   add('actuator', { a: free(0, 1.19), b: R(cart, 'tl'), showRL: true, label: '', mode: 'em', K: 1, RL: 1 });   // EM damper: c = K²/R_L
-  add('spring', { a: free(0, 0.715), b: R(cart, 'l'), coils: 9, amp: 6, label: 'k_1', labelSide: 1, restLen: 1.15 });
+  add('spring', { a: free(0, 0.715), b: R(cart, 'l'), coils: 9, amp: 6, label: 'k_1', labelSide: 1, restLen: 1.15, k: 100 });
   add('damper', { a: free(0, 0.4775), b: R(cart, 'l25'), label: 'C_1', labelSide: -1 });
   add('line', { a: free(2.1, 1.6), b: free(2.1, -0.95), dash: 'dashed' });
   add('line', { a: free(1.75, 0.715), b: free(2.45, 0.715), dash: 'dashed' });
@@ -1785,12 +1802,12 @@ EX.ex2 = exBuilder((add, R) => {
   add('pin', { p: R(cart, 'c'), show: false });       // hidden pin at O: the rod swings about the cart's center
   const end = L2W(rod, rod.len / 2, 0);
   const m2 = add('pointmass', { x: end.x + 1.05 * Math.cos(toRad(-70)), y: end.y + 1.05 * Math.sin(toRad(-70)), size: 11, label: 'm_2', labelDx: -0.4, labelDy: 0, collide: false });
-  add('springdamper', { a: R(rod, 'b'), b: R(m2, 'c'), nonlinear: true, labelK: 'k_2, k_3', labelC: 'C_2', swap: true, restLen: 1.05 });
+  add('springdamper', { a: R(rod, 'b'), b: R(m2, 'c'), nonlinear: true, k2: 100, k3: 400, c: 1, labelK: 'k_2, k_3', labelC: 'C_2', swap: true, restLen: 1.05 });
   // Elastic pendulum: m2 slides along the rod's line on a hidden track that rides on the rod.
   add('track', { a: R(rod, 'b'), b: free(end.x + 1.7 * Math.cos(toRad(-70)), end.y + 1.7 * Math.sin(toRad(-70))), show: false });
-  add('force', { p: R(m2, 'c'), angle: -70, len: 0.55, label: 'F_2(t)' });
-  add('force', { p: R(cart, 'r'), angle: 0, len: 0.8, label: 'F_1(t)' });
-  add('moment', { p: R(cart, 'c'), r: 0.25, start: 210, sweep: -120, label: 'M(t)' });
+  add('force', { p: R(m2, 'c'), angle: -70, len: 0.55, frame: 'body', law: '4*sin(6*t)', label: 'F_2(t)' });   // along the rod
+  add('force', { p: R(cart, 'r'), angle: 0, len: 0.8, law: '15*sin(1.3*t)', label: 'F_1(t)' });
+  add('moment', { p: R(cart, 'c'), r: 0.25, start: 210, sweep: -120, law: '0', label: 'M(t)' });
   add('angle', { v: R(cart, 'c'), r: free(2.1, -0.5), t: R(rod, 'b'), rad: 0.95, arrows: 'both', showRef: false, label: '\\theta(t)' });
   add('dim', { a: free(0, 2.0), b: free(1.2, 2.0), orient: 'horizontal', off: 0.3, label: '\\ell_1' });
   add('dim', { a: free(1.2, 2.0), b: R(cart, 'c'), orient: 'horizontal', off: 0.3, label: 'X(t)' });
@@ -1798,11 +1815,13 @@ EX.ex2 = exBuilder((add, R) => {
   add('dim', { a: R(rod, 'b'), b: R(m2, 'c'), off: 1.0, label: 'Z(t)' });
   add('axes', { p: free(0, 0), lenX: 4.75, lenY: 0.6, yDir: -1, labelX: 'X', labelY: 'Y' });
 }, { title: 'Ref 2: cart with an elastic pendulum', lines: [
-  'The rod swings about O, the center of the cart (hidden pin). m₂ slides along the rod\'s line on a hidden track, held by the nonlinear spring k₂, k₃ and damper C₂: an elastic pendulum.',
-  'The actuator with R_L is an electromagnetic damper: c = K²/R_L (select it to change K or R_L). F₁(t), F₂(t) and M(t) are the applied loads; edit their formulas in the panel.'] });
+  'A 5 kg cart on the spring k₁ = 100 N/m, the damper C₁ and an electromagnetic damper (c = K²/R_L = 1 N·s/m). The rod swings about O, the cart\'s center (hidden pin), starting 20° from vertical.',
+  'm₂ (1 kg) slides along the rod\'s line on a hidden track, held by the nonlinear spring F = k₂Δ + k₃Δ³ (k₂ = 100 N/m, k₃ = 400 N/m³) and damper C₂: an elastic pendulum.',
+  'Loads: F₁(t) = 15 sin 1.3t N pushes the cart; F₂(t) = 4 sin 6t N pulls m₂ along the rod; M(t) is 0 (edit any formula in its panel).',
+  'Try: graph θ for the rod and Z(t) for m₂; turn on trails to see the elastic pendulum\'s path.'] });
 EX.ex3 = exBuilder((add, R) => {
   add('surface', { kind: 'line', pts: [{ x: -0.3, y: 5.0 }, { x: 4.9, y: 5.0 }], side: -1 });
-  const blk = add('block', { x: 2.6, y: 1.15, w: 3.1, h: 1.15, fill: 'white', label: '3m', labelDy: -0.1, mass: 3 });
+  const blk = add('block', { x: 2.6, y: 1.15, w: 3.1, h: 1.15, fill: 'white', label: '3m', labelDy: -0.1, mass: 3, vx: 0.8 });
   // The block slides on a frictionless floor that the original drawing doesn't show (invisible surface).
   add('surface', { kind: 'line', pts: [{ x: -0.3, y: 0.575 }, { x: 5.5, y: 0.575 }], side: 1, show: false, mu_s: 0, mu_k: 0 });
   const disk = add('disk', { x: 2.25, y: 2.225, r: 0.5, fill: 'white', showR: true, angle: toRad(40), label: '' });
@@ -1823,17 +1842,19 @@ EX.ex3 = exBuilder((add, R) => {
   add('dim', { a: R(top, 'c'), b: R(bob, 'c'), off: -0.45, label: '\\ell' });
   add('coord', { p: free(0.85, 3.1), angle: 0, label: 'x_1' });
   add('coord', { p: free(2.25, 3.75), angle: 180, label: 'x_2' });
-  add('spring', { a: free(-0.3, 1.43), b: R(blk, 'l75'), coils: 5, label: 'k' });
-  add('spring', { a: R(blk, 'r75'), b: free(5.5, 1.43), coils: 5, label: 'k' });
+  add('spring', { a: free(-0.3, 1.43), b: R(blk, 'l75'), coils: 5, label: 'k', restLen: 1.35 });
+  add('spring', { a: R(blk, 'r75'), b: free(5.5, 1.43), coils: 5, label: 'k', restLen: 1.35 });
   add('damper', { a: free(-0.3, 0.86), b: R(blk, 'l25'), label: 'd', labelSide: -1 });
   add('leader', { a: free(1.75, 1.45), b: free(2.1, 1.74), label: '\\mu \\neq 0' });
 }, { title: 'Ref 3: disk rolling on a moving block', lines: [
-  'The 3m block (3 kg) slides on a frictionless floor (invisible surface) between springs k and damper d. The disk rolls on top of it with friction; its spring k and damper d attach to posts that ride on the block.',
+  'The 3m block (3 kg) slides on a frictionless floor (invisible surface) between springs k and damper d, and starts at 0.8 m/s. The disk (1 kg) rolls on top of it with friction; its spring k and damper d attach to posts that ride on the block.',
   'The pendulum (rod + bob, welded) hangs from the ceiling and is tied to the block\'s right post by spring 2k.',
   'Try: select the disk with the free-body diagram and rolling indicator on. Its rolling is measured relative to the moving block.'] });
 EX.ex4 = exBuilder((add, R) => {
   add('surface', { kind: 'polyline', pts: [{ x: 0, y: 4.6 }, { x: 0, y: 0 }, { x: 1.4, y: 0 }, { x: 1.4, y: 4.6 }], side: 1 });
-  const blk = add('block', { x: 0.7, y: 2.45, w: 1.25, h: 1.25, label: 'm_c' });
+  const blk = add('block', { x: 0.7, y: 2.45, w: 1.25, h: 1.25, label: 'm_c', mass: 2 });
+  // The channel guides the block straight up and down (hidden slider), so it can't tip and wedge itself.
+  add('track', { a: free(0.7, 0.8), b: free(0.7, 3.0), show: false, host: 'ground', width: 4 });
   add('spring', { a: free(0.7, 0), b: R(blk, 'b'), style: 'coil', coils: 7, amp: 14, label: 'k_v', labelSide: 1, restLen: 1.6 });
   const link = add('rod', rodGeom({ x: 0.7, y: 3.075 }, { x: 0.8, y: 4.95 }));
   add('pin', { p: R(blk, 't') });
@@ -1845,8 +1866,9 @@ EX.ex4 = exBuilder((add, R) => {
   add('gravity', { p: free(2.4, 4.1), label: 'g' });
   add('disk', { x: 4.7, y: 2.6, r: 0.9, label: '', centerPin: false, fixed: true });   // not connected to anything in the drawing: held in place
 }, { title: 'Ref 4: block in a channel driving a lever', lines: [
-  'The block m_c sits in a channel on the coil spring k_v. A link pinned to its top drives the beam m_b, which pivots on a ground pin.',
-  'The spring starts stretched past its rest length, so the block is pulled down and the beam rocks. The large disk isn\'t connected to anything in the original drawing, so it\'s fixed in place.'] });
+  'The 2 kg block m_c rides up and down the channel (a hidden slider keeps it from tipping) on the coil spring k_v = 100 N/m. A link pinned to its top drives the beam m_b, which pivots on a ground pin.',
+  'The spring starts stretched past its rest length, so the block is pulled down and the beam rocks: a one-degree-of-freedom oscillator. The beam\'s inertia about the pivot adds to the block\'s mass, so it swings slower than √(k/m) alone.',
+  'The large disk isn\'t connected to anything in the original drawing, so it\'s fixed in place.'] });
 
 /* ---- AP presets (Phase 5) ----
    Each preset: a builder (same add/R helpers as the examples), the analysis views to turn on, notes
@@ -1874,17 +1896,39 @@ function loadPreset(key) {
   saveAna(); buildToolbar(); setTool('select');
   ui.sel = new Set(ctx.main ? [ctx.main.id] : []);
   ui.notesClosed = false;
-  texReset(); commit(); fitView(); applyShow();
+  texReset(); commit(); applyShow();
   buildGraphs();
+  fitView(P.frame);                            // after the graphs dock opens, so the whole scene fits above it
   showPanel();
   msg(`Loaded "${P.name}". Press Play.`);
 }
 const ceiling = (add, x0, x1, y) => add('surface', { kind: 'line', pts: [{ x: x0, y }, { x: x1, y }], side: -1 });   // hatched above
 const along = (deg, d, from = { x: 0, y: 0 }) => V.add(from, V.mul(V.dir(toRad(deg)), d));
+// One spring-mass row on a frictionless floor: wall at x = -1, 1 kg block whose rest position is x = 0, k = 100 N/m.
+function smRow(add, R, y0, x0, props) {
+  add('surface', { kind: 'line', pts: [{ x: -1, y: y0 }, { x: 1.8, y: y0 }], side: 1, mu_s: 0, mu_k: 0 });
+  add('surface', { kind: 'line', pts: [{ x: -1, y: y0 }, { x: -1, y: y0 + 0.8 }], side: -1 });
+  const b = add('block', { x: x0, y: y0 + 0.2, w: 0.4, h: 0.4, mass: 1, label: 'm' });
+  add('springdamper', { a: free(-1, y0 + 0.2), b: R(b, 'l'), k: 100, restLen: 0.8, ...props });
+  return b;
+}
+// Size of the step-averaged force on body o from ledger entries whose key starts with prefix
+// ('rp:' rope tension, 'cn:b:o3' normal force from object o3, 'jt:' joint reactions).
+function ledgerF(sim, o, prefix) {
+  let x = 0, y = 0;
+  for (const [k, e] of sim.recs.get(o.id).ledger) if (k.startsWith(prefix) && e.active) { x += e.F.x; y += e.F.y; }
+  return Math.hypot(x, y);
+}
+// Arithmetic-geometric mean: the exact pendulum period is T = 2π√(L/g) / AGM(1, cos(θ₀/2)).
+const agm = (a, b) => { for (let i = 0; i < 30; i++) [a, b] = [(a + b) / 2, Math.sqrt(a * b)]; return a; };
+// Menu groups, in order.
+const T_KIN = 'Kinematics', T_FOR = 'Forces and Newton\'s laws', T_EN = 'Work and energy', T_MOM = 'Momentum and collisions',
+  T_ROT = 'Rotation', T_OSC = 'Oscillations', T_GRAV = 'Gravitation', T_ENG = 'Engineering';
+const PRESET_TOPICS = [T_KIN, T_FOR, T_EN, T_MOM, T_ROT, T_OSC, T_GRAV, T_ENG];
 
 const PRESETS = {
   incline: {
-    name: 'Block on an incline with friction',
+    name: 'Block on an incline with friction', topic: T_FOR,
     build(add, R, sc, ctx) {
       const u = V.dir(toRad(30)), n = V.perp(u), top = V.mul(u, 6);
       add('surface', { kind: 'polyline', pts: [{ x: -2, y: 0 }, { x: 0, y: 0 }, top], side: 1, mu_s: 0.5, mu_k: 0.3 });
@@ -1901,13 +1945,14 @@ const PRESETS = {
     check(sc, c) { const a = accelOf(sc, c.main, V.mul(c.u, -1), 0.3, 1).a, w = 9.81 * (0.5 - 0.3 * Math.cos(toRad(30))); return { meas: `a = ${a.toFixed(4)} m/s²`, exp: `${w.toFixed(3)} ±1%`, pass: relErr(a, w) <= 0.01 }; },
   },
   atwood: {
-    name: 'Atwood machine (massless pulley)',
+    name: 'Atwood machine (massless pulley)', topic: T_FOR,
     build(add, R, sc, ctx) {
       const p = add('pulley', { x: 0, y: 3, r: 0.2, mass: 0, fixed: true, mount: 'ground', mountAngle: 90, mountLen: 40 });
+      add('surface', { kind: 'line', pts: [{ x: -0.8, y: 0.5 }, { x: 0.8, y: 0.5 }], side: 1 });   // m₂ lands before m₁ reaches the pulley
       const m1 = add('block', { x: -0.2, y: 1.4, w: 0.3, h: 0.3, mass: 2, label: 'm_1', labelDx: -0.45 });
       ctx.main = add('block', { x: 0.2, y: 1.8, w: 0.3, h: 0.3, mass: 3, label: 'm_2', labelDx: 0.45 });
       add('rope', { a: R(m1, 't'), b: R(ctx.main, 't'), via: [{ id: p.id, s: -1 }] });
-      add('text', { p: free(-0.9, 0.9), label: 'm_1 = 2\\,\\mathrm{kg}' }); add('text', { p: free(0.9, 0.9), label: 'm_2 = 3\\,\\mathrm{kg}' });
+      add('text', { p: free(-0.6, 0.1), label: 'm_1 = 2\\,\\mathrm{kg}' }); add('text', { p: free(0.6, 0.1), label: 'm_2 = 3\\,\\mathrm{kg}' });
     },
     show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'energy' }],
     notes: ['Two blocks over an ideal (massless, frictionless) pulley: the tension is the same on both sides.',
@@ -1916,14 +1961,15 @@ const PRESETS = {
     check(sc, c) { const a = accelOf(sc, c.main, { x: 0, y: -1 }, 0.2, 0.8).a; return { meas: `a = ${a.toFixed(4)} m/s²`, exp: '1.962 ±1%', pass: relErr(a, 1.962) <= 0.01 }; },
   },
   atwoodMassive: {
-    name: 'Atwood machine (massive pulley)',
+    name: 'Atwood machine (massive pulley)', topic: T_ROT,
     build(add, R, sc, ctx) {
       const p = add('pulley', { x: 0, y: 3, r: 0.2, mass: 2, shape: 'solid disk', fill: 'gray', fixed: true, mount: 'ground', mountAngle: 90, mountLen: 40, label: 'M', labelDx: 0.4, labelDy: 0.1 });
+      add('surface', { kind: 'line', pts: [{ x: -0.8, y: 0.5 }, { x: 0.8, y: 0.5 }], side: 1 });
       const m1 = add('block', { x: -0.2, y: 1.4, w: 0.3, h: 0.3, mass: 2, label: 'm_1', labelDx: -0.45 });
       ctx.main = add('block', { x: 0.2, y: 1.8, w: 0.3, h: 0.3, mass: 3, label: 'm_2', labelDx: 0.45 });
       ctx.pulley = p;
       add('rope', { a: R(m1, 't'), b: R(ctx.main, 't'), via: [{ id: p.id, s: -1 }] });
-      add('text', { p: free(0, 0.7), label: 'M = 2\\,\\mathrm{kg}\\ \\text{(solid disk)}' });
+      add('text', { p: free(0, 0.1), label: 'M = 2\\,\\mathrm{kg}\\ \\text{(solid disk)}' });
     },
     show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'omega', body: c.pulley.id }],
     notes: ['Now the pulley is a 2 kg solid disk (I = ½MR²) and the rope doesn\'t slip, so the pulley must be spun up: the two tensions differ.',
@@ -1932,7 +1978,7 @@ const PRESETS = {
     check(sc, c) { const a = accelOf(sc, c.main, { x: 0, y: -1 }, 0.2, 0.8).a; return { meas: `a = ${a.toFixed(4)} m/s²`, exp: '1.635 ±1%', pass: relErr(a, 9.81 / 6) <= 0.01 }; },
   },
   springMass: {
-    name: 'Spring-mass oscillator',
+    name: 'Spring-mass oscillator', topic: T_OSC,
     build(add, R, sc, ctx) {
       add('surface', { kind: 'polyline', pts: [{ x: -1, y: 1.1 }, { x: -1, y: 0 }, { x: 2.5, y: 0 }], side: 1, mu_s: 0, mu_k: 0 });
       ctx.main = add('block', { x: 0.1, y: 0.2, w: 0.4, h: 0.4, mass: 1, label: 'm' });
@@ -1947,7 +1993,7 @@ const PRESETS = {
     check(sc, c) { const T = periodOf(sc, c.main, 'vx', 3); return { meas: `T = ${T.toFixed(4)} s`, exp: '0.6283 ±1%', pass: relErr(T, TAU / 10) <= 0.01 }; },
   },
   pendulum: {
-    name: 'Simple pendulum',
+    name: 'Simple pendulum', topic: T_OSC,
     build(add, R, sc, ctx) {
       ceiling(add, -0.7, 0.7, 2);
       add('pin', { p: free(0, 2) });
@@ -1964,7 +2010,7 @@ const PRESETS = {
     check(sc, c) { const T = periodOf(sc, c.main, 'vx', 8), w = TAU * Math.sqrt(1.5 / 9.81) * (1 + toRad(10) ** 2 / 16); return { meas: `T = ${T.toFixed(4)} s`, exp: `${w.toFixed(4)} ±1%`, pass: relErr(T, w) <= 0.01 }; },
   },
   physPendulum: {
-    name: 'Physical pendulum (rod pivoted at one end)',
+    name: 'Physical pendulum (rod pivoted at one end)', topic: T_OSC,
     build(add, R, sc, ctx) {
       ceiling(add, -0.7, 0.7, 2);
       ctx.main = add('rod', { ...rodGeom({ x: 0, y: 2 }, along(-80, 1, { x: 0, y: 2 })), mass: 1, width: 6, label: 'M', labelDx: 0.3 });
@@ -1978,7 +2024,7 @@ const PRESETS = {
     check(sc, c) { const T = periodOf(sc, c.main, 'w', 7), w = TAU * Math.sqrt(2 / (3 * 9.81)) * (1 + toRad(10) ** 2 / 16); return { meas: `T = ${T.toFixed(4)} s`, exp: `${w.toFixed(4)} ±1%`, pass: relErr(T, w) <= 0.01 }; },
   },
   rollRace: {
-    name: 'Rolling race: sphere, disk, hoop',
+    name: 'Rolling race: sphere, disk, hoop', topic: T_ROT,
     build(add, R, sc, ctx) {
       const u = V.dir(toRad(30)), n = V.perp(u);
       ctx.bodies = [];
@@ -2001,7 +2047,7 @@ const PRESETS = {
     },
   },
   collide1D: {
-    name: '1D collisions: elastic and perfectly inelastic',
+    name: '1D collisions: elastic and perfectly inelastic', topic: T_MOM,
     build(add, R, sc, ctx) {
       ctx.rows = [];
       [[1.6, false, 'e = 1\\ \\text{(elastic)}'], [0, true, '\\text{stick (perfectly inelastic)}']].forEach(([y, stick, tex]) => {
@@ -2025,7 +2071,7 @@ const PRESETS = {
     },
   },
   collide2D: {
-    name: '2D collision: equal pucks, glancing blow',
+    name: '2D collision: equal pucks, glancing blow', topic: T_MOM,
     build(add, R, sc, ctx) {
       sc.settings.g = 0;
       ctx.a = add('disk', { x: -2, y: 0.2, r: 0.2, mass: 1, e: 1, mu_s: 0, mu_k: 0, vx: 3, label: 'm_1', labelDy: 0.4 });
@@ -2045,7 +2091,7 @@ const PRESETS = {
     },
   },
   ballRod: {
-    name: 'Ball sticks to a pinned rod (angular momentum)',
+    name: 'Ball sticks to a pinned rod (angular momentum)', topic: T_ROT,
     build(add, R, sc, ctx) {
       sc.settings.g = 0;
       ctx.rod = add('rod', { ...rodGeom({ x: 0, y: 1 }, { x: 0, y: 0 }), mass: 1, width: 4, label: 'M', labelDx: 0.25 });
@@ -2069,7 +2115,7 @@ const PRESETS = {
     },
   },
   projectile: {
-    name: 'Projectile with and without air drag',
+    name: 'Projectile with and without air drag', topic: T_KIN,
     build(add, R, sc, ctx) {
       add('surface', { kind: 'line', pts: [{ x: -1, y: 0 }, { x: 12.5, y: 0 }], side: 1, mu_s: 0.5, mu_k: 0.4 });
       const v = 10 / Math.SQRT2;
@@ -2097,7 +2143,7 @@ const PRESETS = {
     },
   },
   loop: {
-    name: 'Vertical loop',
+    name: 'Vertical loop', topic: T_EN,
     build(add, R, sc, ctx) {
       const arc = (cx, cy, r, a0, a1) => { const out = []; for (let a = a0; a <= a1 + 1e-9; a += 5) out.push({ x: cx + r * Math.cos(toRad(a)), y: cy + r * Math.sin(toRad(a)) }); return out; };
       const pts = arc(0, 4, 4, 200, 270);                                    // ramp: arc of radius 4 ending level at (0, 0)
@@ -2138,18 +2184,728 @@ const PRESETS = {
     },
   },
   orbit: {
-    name: 'Circular orbit (universal gravitation)',
+    name: 'Circular orbit (universal gravitation)', topic: T_GRAV,
     build(add, R, sc, ctx) {
       sc.settings.gMode = 'universal'; sc.settings.G = 1;
       add('disk', { x: 0, y: 0, r: 0.4, mass: 1000, fixed: true, label: 'M', labelDx: 0.6, labelDy: 0.3, centerPin: false });
       ctx.main = add('disk', { x: 5, y: 0, r: 0.12, mass: 1, vy: Math.sqrt(1000 / 5), label: 'm', labelDx: 0.35, centerPin: false });
       add('dim', { a: free(0, 0), b: free(5, 0), off: -0.5, label: 'r' });
     },
+    frame: { x0: -5.6, y0: -5.6, x1: 5.6, y1: 5.6 },
     show: { trails: true, vel: true, graphs: true }, trailSec: 2.3, graphs: (c) => [{ kind: 'pos', body: c.main.id }, { kind: 'energy' }],
     notes: ['Universal gravitation with G = 1 (sandbox units). A fixed 1000 kg mass and a 1 kg planet at r = 5 m with v₀ = √(GM/r) = 14.14 m/s.',
       'Textbook: circular speed v = √(GM/r), period T = 2π√(r³/GM) = 2.22 s, U = −GMm/r = −200 J, K = ½mv² = 100 J = −U/2, E = −100 J.',
       'Try: select the planet and set v₀ᵧ to 12 for an ellipse (Kepler: T = 2π√(a³/GM)) or to 20 = √2·v for escape (E = 0).'],
     check(sc, c) { const T = periodOf(sc, c.main, 'vx', 5); return { meas: `T = ${T.toFixed(4)} s`, exp: `${(TAU * Math.sqrt(125 / 1000)).toFixed(4)} ±1%`, pass: relErr(T, TAU * Math.sqrt(0.125)) <= 0.01 }; },
+  },
+  car: {
+    name: 'Car with suspension over a speed bump', topic: T_ENG,
+    build(add, R, sc, ctx) {
+      // Road: flat from 0 to 10 m with a 10 cm speed bump, between two 15° ramps with rounded feet (so the
+      // car rolls back and forth instead of driving off the end). Sampled every 10 cm as one polyline.
+      const t15 = Math.tan(toRad(15)), Rf = 4, ramp = (s) => s <= Rf * t15 ? s * s / (2 * Rf) : Rf * t15 * t15 / 2 + t15 * (s - Rf * t15);
+      const road = (x) => x < 0 ? ramp(-x) : x > 10 ? ramp(x - 10) : x > 3.8 && x < 5.0 ? 0.05 * (1 - Math.cos(TAU * (x - 3.8) / 1.2)) : 0;
+      const pts = [];
+      for (let i = -36; i <= 136; i++) pts.push({ x: i / 10, y: +road(i / 10).toFixed(5) });
+      add('surface', { kind: 'polyline', pts, side: 1, mu_s: 0.9, mu_k: 0.8 });
+      // Half-car: 400 kg body, two 20 kg wheels (r = 0.3 m) 2.4 m apart. Each wheel slides on a hidden
+      // vertical strut that rides on the body and spins freely; a spring + damper holds the body up.
+      const v0 = 3, M = 400, k = 11370, cD = 905, xc = 1.6, yb = 1.25, r = 0.3, a = 1.2;
+      const body = add('block', { x: xc, y: yb, w: 3.4, h: 0.6, mass: M, vx: v0, fill: 'white', label: 'M', labelDy: 0.02 });
+      const onB = (x, y) => ({ ref: body.id, a: '@', lx: x - body.x, ly: y - body.y, x, y });
+      const sag = M * 9.81 / 2 / k;                     // each corner carries half the body's weight
+      ctx.wheels = [-a, a].map((dx) => {
+        const w = add('disk', { x: xc + dx, y: r, r, mass: 20, mu_s: 0.9, mu_k: 0.8, vx: v0, omega: -v0 / r, label: '' });
+        add('track', { a: onB(xc + dx, 0), b: onB(xc + dx, yb - 0.3), show: false, rotate: true, host: body.id, width: 4 });
+        // Rest length = drawn length + sag, so the car starts in equilibrium.
+        ctx.strut = add('springdamper', { a: onB(xc + dx, yb - 0.3), b: R(w, 'c'), k, c: cD, restLen: +(yb - 0.3 - r + sag).toFixed(4), labelK: dx < 0 ? 'k' : '', labelC: dx < 0 ? 'c' : '', coils: 5, amp: 9 });
+        return w;
+      });
+      ctx.main = ctx.body = body; ctx.M = M; ctx.k = k; ctx.c = cD;
+      add('dim', { a: R(ctx.wheels[0], 'c'), b: R(ctx.wheels[1], 'c'), off: -0.55, label: '2a' });
+      add('leader', { a: free(5.7, 0.75), b: free(4.45, 0.08), label: '\\text{bump}' });
+      add('gravity', { p: free(-2.4, 1.6), label: 'g' });
+    },
+    show: { graphs: true }, graphs: (c) => [{ kind: 'acc', body: c.body.id }, { kind: 'theta', body: c.body.id }, { kind: 'force', body: c.body.id, force: 'sp:' + c.strut.id, comp: 'm' }],
+    notes: ['A half-car model: a 400 kg body on two wheels (20 kg, r = 0.3 m, 2.4 m apart). Each corner has a spring k = 11 370 N/m and damper c = 905 N·s/m. The wheels slide on struts that ride on the body (hidden tracks) and roll on the road. It coasts at 3 m/s over a 10 cm speed bump, then rolls up a ramp, stops and comes back.',
+      'Static sag: each spring holds Mg/2 = 1962 N, so it\'s compressed δ = Mg/2k = 17.3 cm. The rest lengths include that, so the car starts level and still.',
+      'Bounce (heave): the body bobs on 2k, so ωn = √(2k/M) = 7.54 rad/s (1.20 Hz). Damping ratio ζ = c/√(2kM) = 0.30, so ωd = ωn√(1 − ζ²) = 7.19 rad/s and Td = 0.874 s. Each half swing is e^(−πζ/√(1−ζ²)) = 37% of the one before.',
+      'Pitch: the front wheel hits the bump 0.8 s (2a/v) before the back one, so the body rocks nose-up then nose-down (the θ graph). The front spring\'s force graph shows the hit: 1962 N plus the bump load.',
+      'Try: set c to 0 (no shocks) and watch it keep bouncing, or 3016 (critical damping, ζ = 1). Raise the speed to 6 m/s and the bump hits harder and faster.'],
+    check(sc, c) {
+      // 1) Static equilibrium: rolling on the flat road before the front wheel reaches the bump, the body doesn't sink or rise.
+      let drift = 0;
+      simulate(sc, 0.25, (s) => { drift = Math.max(drift, Math.abs(recOf(s, c.body).getWorldCenter().y - c.body.y)); });
+      // 2) Drop test: parked, body given a downward kick. Period and decay of the bounce vs theory.
+      const sc2 = JSON.parse(JSON.stringify(sc));
+      for (const o of sc2.objects) if ('vx' in o) { o.vx = 0; o.omega = 0; }
+      sc2.objects.find((o) => o.id === c.body.id).vy = -0.3;
+      const ts = [], vs = [], ys = [];
+      simulate(sc2, 3, (s) => { const b = recOf(s, c.body); ts.push(s.t); vs.push(b.getLinearVelocity().y); ys.push(b.getWorldCenter().y); });
+      const Td = periodFromCrossings(ts, vs), yEq = c.body.y;     // it starts at equilibrium
+      const peaks = [];
+      for (let i = 1; i < vs.length && peaks.length < 2; i++) if ((vs[i - 1] < 0) !== (vs[i] < 0)) peaks.push(Math.abs(ys[i] - yEq));
+      const d = Math.log(peaks[0] / peaks[1]), zeta = d / Math.sqrt(Math.PI * Math.PI + d * d);
+      const wn = Math.sqrt(2 * c.k / c.M), z0 = c.c / Math.sqrt(2 * c.k * c.M), T0 = TAU / (wn * Math.sqrt(1 - z0 * z0));
+      return { meas: `drift ${(1000 * drift).toFixed(2)} mm; Td = ${Td.toFixed(4)} s, ζ = ${zeta.toFixed(3)}`, exp: `< 1 mm; ${T0.toFixed(4)} s ±2%, ${z0.toFixed(3)} ±3%`, pass: drift < 0.001 && relErr(Td, T0) <= 0.02 && relErr(zeta, z0) <= 0.03 };
+    },
+  },
+  beams: {
+    name: 'Flexible beams: cantilever and simply supported', topic: T_ENG,
+    build(add, R, sc, ctx) {
+      // Top: a 2 m cantilever (2 kg, EI = 4000 N·m²) welded to a wall, 10 kg at its tip.
+      add('surface', { kind: 'line', pts: [{ x: 0, y: 2.2 }, { x: 0, y: 3.8 }], side: 1 });
+      ctx.cant = add('rod', { ...rodGeom({ x: 0, y: 3 }, { x: 2, y: 3 }), mass: 2, EI: 4000, pieces: 8, width: 5 });
+      add('weld', { p: R(ctx.cant, 'a') });
+      ctx.tip = add('pointmass', { x: 2, y: 3, mass: 10, size: 12, collide: false, label: 'M', labelDx: 0.25, labelDy: 0.2 });
+      add('weld', { p: R(ctx.tip, 'c') });
+      add('dim', { a: free(0, 3), b: free(2, 3), off: 0.45, label: 'L' });
+      // Bottom: a 3 m beam (3 kg, EI = 4000 N·m²) on a pin at A and a roller at B, 20 kg at midspan.
+      ctx.ss = add('rod', { ...rodGeom({ x: 0, y: 1 }, { x: 3, y: 1 }), mass: 3, EI: 4000, pieces: 10, width: 5 });
+      add('pin', { p: R(ctx.ss, 'a'), mount: 'ground', mountAngle: -90, mountLen: 26 });
+      const roller = add('disk', { x: 3, y: 1, r: 0.08, mass: 0.05, fill: 'white', centerPin: false, label: '' });
+      add('surface', { kind: 'line', pts: [{ x: 2.7, y: 0.92 }, { x: 3.3, y: 0.92 }], side: 1 });
+      add('pin', { p: R(roller, 'c') });
+      ctx.mid = add('pointmass', { x: 1.5, y: 1, mass: 20, size: 12, collide: false, label: 'M', labelDx: 0.25, labelDy: 0.2 });
+      add('weld', { p: R(ctx.mid, 'c') });
+      add('text', { p: free(-0.15, 0.55), label: 'A' }); add('text', { p: free(3.15, 0.55), label: 'B' });
+      add('dim', { a: free(0, 1), b: free(3, 1), off: -0.75, label: 'L' });
+      add('gravity', { p: free(3.2, 3.4), label: 'g' });
+      ctx.main = ctx.cant;
+    },
+    show: { graphs: true }, graphs: (c) => [{ kind: 'pos', body: c.tip.id }, { kind: 'pos', body: c.mid.id }, { kind: 'energy' }],
+    notes: ['Rods can bend: set "Bending stiffness EI" in a rod\'s panel (0 = rigid). It\'s simulated as short rigid pieces joined at n bend points by angular springs K = EI/ℓ with ℓ = L/n. That matches beam theory to about 1/n² (1% at n = 10) for a point load, and better for smooth loads.',
+      'Top, cantilever (L = 2 m, beam 2 kg, EI = 4000 N·m², tip mass M = 10 kg): tip stiffness k = 3EI/L³ = 1500 N/m, so the tip sags δ = PL³/3EI + wL⁴/8EI = 65.4 + 4.9 = 70.3 mm and bounces at T = 2π√((M + 0.243m)/k) = 0.525 s (0.243m is the beam\'s own share of the moving mass).',
+      'Bottom, simply supported (L = 3 m, beam 3 kg, EI = 4000 N·m², M = 20 kg at midspan, pin at A and roller at B): k = 48EI/L³ = 7111 N/m, δ = PL³/48EI + 5wL⁴/384EI = 27.6 + 2.6 = 30.2 mm, T = 2π√((M + 0.486m)/k) = 0.345 s.',
+      'Both start straight and are dropped under gravity, so they vibrate about the sagged shape (nothing damps them). Try: double EI and the sag halves while the period drops by √2. Or add a damper from the tip to the ground.'],
+    check(sc, c) {
+      const g = 9.81, ts = [], v1 = [], v2 = [], y1 = [], y2 = [];
+      simulate(sc, 4.2, (s) => { const a = recOf(s, c.tip), b = recOf(s, c.mid); ts.push(s.t); v1.push(a.getLinearVelocity().y); v2.push(b.getLinearVelocity().y); y1.push(3 - a.getWorldCenter().y); y2.push(1 - b.getWorldCenter().y); });
+      const T1 = periodFromCrossings(ts, v1), T2 = periodFromCrossings(ts, v2);
+      // Mean sag over whole cycles only (turning point to turning point), so the average is the static sag.
+      const meanSag = (ys, vs) => {
+        const cr = [];
+        for (let i = 1; i < vs.length; i++) if ((vs[i - 1] < 0) !== (vs[i] < 0)) cr.push(i);
+        const a = cr[0], b = cr[cr.length - 1 - ((cr.length - 1) % 2)];
+        return ys.slice(a, b).reduce((sum, y) => sum + y, 0) / (b - a);
+      };
+      const s1 = meanSag(y1, v1), s2 = meanSag(y2, v2), n = 1;
+      const k1 = 3 * 4000 / 8, k2 = 48 * 4000 / 27, W1 = TAU * Math.sqrt((10 + 0.243 * 2) / k1), W2 = TAU * Math.sqrt((20 + 0.486 * 3) / k2);
+      const d1 = 10 * g / k1 + (2 * g / 2) * 16 / (8 * 4000), d2 = 20 * g / k2 + 5 * (3 * g / 3) * 81 / (384 * 4000);
+      return { meas: `T = ${T1.toFixed(4)}, ${T2.toFixed(4)} s; mean sag ${(1000 * s1 / n).toFixed(1)}, ${(1000 * s2 / n).toFixed(1)} mm`,
+        exp: `${W1.toFixed(4)}, ${W2.toFixed(4)} s (±2%); ${(1000 * d1).toFixed(1)}, ${(1000 * d2).toFixed(1)} mm (±2%)`,
+        pass: relErr(T1, W1) <= 0.02 && relErr(T2, W2) <= 0.02 && relErr(s1 / n, d1) <= 0.02 && relErr(s2 / n, d2) <= 0.02 };
+    },
+  },  modAtwood: {
+    name: 'Block on a table pulled by a hanging mass', topic: T_FOR,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'polyline', pts: [{ x: -3, y: 0 }, { x: 0, y: 0 }, { x: 0, y: -2.2 }], side: 1, mu_s: 0.3, mu_k: 0.2 });
+      add('surface', { kind: 'line', pts: [{ x: 0, y: -2.2 }, { x: 1.4, y: -2.2 }], side: 1 });
+      const p = add('pulley', { x: 0.2, y: 0.03, r: 0.12, mount: 'ground', mountAngle: -135, mountLen: 22 });
+      const m1 = add('block', { x: -1.5, y: 0.15, w: 0.5, h: 0.3, mass: 2, label: 'm_1' });
+      ctx.main = add('block', { x: 0.32, y: -1.0, w: 0.25, h: 0.25, mass: 1, label: 'm_2', labelDx: 0.35 });
+      add('rope', { a: R(m1, 'r'), b: R(ctx.main, 't'), via: [{ id: p.id, s: -1 }] });
+      add('text', { p: free(-1.5, 0.6), label: '\\mu_s = 0.3,\\ \\mu_k = 0.2' });
+    },
+    show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'energy' }],
+    notes: ['m₁ = 2 kg on a table (μs = 0.3, μk = 0.2) tied over an ideal pulley to m₂ = 1 kg. m₂g = 9.81 N is more than static friction can hold (μs m₁g = 5.89 N), so it moves.',
+      'Textbook: a = (m₂ − μk m₁)g/(m₁ + m₂) = 1.962 m/s², T = m₂(g − a) = 7.85 N. Friction turns some of m₂\'s lost potential energy into heat (the E_thermal line).',
+      'Try: raise the table\'s μs to 0.6 and nothing moves (static friction f_s = 9.81 N), or make it frictionless (a = m₂g/(m₁ + m₂) = 3.27 m/s²).'],
+    check(sc, c) { const a = accelOf(sc, c.main, { x: 0, y: -1 }, 0.2, 0.8).a, w = (1 - 0.2 * 2) * 9.81 / 3; return { meas: `a = ${a.toFixed(4)} m/s²`, exp: `${w.toFixed(3)} ±1%`, pass: relErr(a, w) <= 0.01 }; },
+  },
+  inclinePulley: {
+    name: 'Incline and hanging mass over a pulley', topic: T_FOR,
+    build(add, R, sc, ctx) {
+      const u = V.dir(toRad(30)), n = V.perp(u), top = V.mul(u, 3);
+      add('surface', { kind: 'polyline', pts: [{ x: -0.6, y: 0 }, { x: 0, y: 0 }, top, { x: top.x, y: -1.3 }, { x: top.x + 1.3, y: -1.3 }], side: 1, mu_s: 0.3, mu_k: 0.2 });
+      // Pulley just past the top, placed so the rope leaves the block parallel to the incline.
+      const pc = V.add(V.mul(u, 3.25), V.mul(n, 0.15 - 0.12));
+      const p = add('pulley', { ...pc, r: 0.12, mount: 'ground', mountAngle: -135, mountLen: 22 });
+      const m1 = add('block', { ...V.add(V.mul(u, 0.9), V.mul(n, 0.15)), w: 0.4, h: 0.3, angle: toRad(30), mass: 2, label: 'm_1' });
+      ctx.main = add('block', { x: pc.x + 0.12, y: pc.y - 1.0, w: 0.25, h: 0.25, mass: 2, label: 'm_2', labelDx: 0.35 });
+      add('rope', { a: R(m1, 'r'), b: R(ctx.main, 't'), via: [{ id: p.id, s: -1 }] });
+      add('angle', { v: free(0, 0), r: free(0.8, 0), t: free(top.x, top.y), rad: 0.6, arrows: 'none', showRef: true, label: '30^\\circ' });
+      add('text', { p: free(1.0, 1.25), label: '\\mu_k = 0.2' });
+    },
+    show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'energy' }],
+    notes: ['m₁ = 2 kg on a 30° incline (μs = 0.3, μk = 0.2), tied over an ideal pulley at the top to a hanging m₂ = 2 kg. m₂ wins, so m₁ slides up and friction points down the slope.',
+      'Textbook: a = (m₂ − m₁ sin θ − μk m₁ cos θ)g/(m₁ + m₂) = 1.603 m/s², T = m₂(g − a) = 16.41 N.',
+      'Try: make m₂ = 0.5 kg. Now m₂g − m₁g sin θ = −4.9 N but static friction can supply up to μs m₁g cos θ = 5.1 N, so it stays put.'],
+    check(sc, c) { const a = accelOf(sc, c.main, { x: 0, y: -1 }, 0.2, 0.8).a, w = (2 - 2 * 0.5 - 0.2 * 2 * Math.cos(toRad(30))) * 9.81 / 4; return { meas: `a = ${a.toFixed(4)} m/s²`, exp: `${w.toFixed(3)} ±1%`, pass: relErr(a, w) <= 0.01 }; },
+  },
+  stacked: {
+    name: 'Stacked blocks: the top one slips', topic: T_FOR,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1, y: 0 }, { x: 5, y: 0 }], side: 1, mu_s: 0, mu_k: 0 });
+      add('surface', { kind: 'line', pts: [{ x: 5, y: 0 }, { x: 10, y: 0 }], side: 1, mu_s: 0.5, mu_k: 0.4 });
+      ctx.bot = add('block', { x: 0.8, y: 0.15, w: 1.6, h: 0.3, mass: 3, mu_s: 0.4, mu_k: 0.3, label: 'M' });
+      ctx.top = add('block', { x: 1.3, y: 0.45, w: 0.4, h: 0.3, mass: 1, mu_s: 0.4, mu_k: 0.3, fill: 'white', label: 'm' });
+      add('force', { p: R(ctx.bot, 'r'), angle: 0, len: 0.7, law: '20*step(0.8 - t)', label: 'F' });
+      add('text', { p: free(2.5, -0.35), label: '\\text{frictionless}' }); add('text', { p: free(7.5, -0.35), label: '\\text{rough}' });
+      ctx.main = ctx.top;
+    },
+    show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.top.id }, { kind: 'vel', body: c.bot.id }],
+    notes: ['F = 20 N pulls the 3 kg bottom block for 0.8 s on a frictionless floor. The only thing pulling the 1 kg top block forward is friction from the bottom block (μs = 0.4, μk = 0.3).',
+      'Would they move together? That needs a = F/(M + m) = 5 m/s² for the top block, but static friction can give it at most μs g = 3.92 m/s². So it slips.',
+      'Textbook (slipping): a_top = μk g = 2.943 m/s²; a_bottom = (F − μk m g)/M = 5.686 m/s². Friction on the top block is forward; its reaction on the bottom block is backward (Newton\'s 3rd law, visible in the FBDs).',
+      'After F stops, friction speeds up the top block and slows the bottom one until they match; then both coast onto the rough patch and stop together.'],
+    check(sc, c) {
+      const at = accelOf(sc, c.top, { x: 1, y: 0 }, 0.1, 0.6).a, ab = accelOf(sc, c.bot, { x: 1, y: 0 }, 0.1, 0.6).a, wt = 0.3 * 9.81, wb = (20 - 0.3 * 9.81) / 3;
+      return { meas: `a_top = ${at.toFixed(4)}, a_bottom = ${ab.toFixed(4)} m/s²`, exp: `${wt.toFixed(3)}, ${wb.toFixed(3)} (±1%)`, pass: relErr(at, wt) <= 0.01 && relErr(ab, wb) <= 0.01 };
+    },
+  },
+  elevator: {
+    name: 'Elevator: apparent weight', topic: T_FOR,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -0.75, y: -0.3 }, { x: -0.75, y: 6.6 }], side: -1, mu_s: 0, mu_k: 0 });
+      add('surface', { kind: 'line', pts: [{ x: 0.75, y: -0.3 }, { x: 0.75, y: 6.6 }], side: 1, mu_s: 0, mu_k: 0 });
+      ctx.plat = add('block', { x: 0, y: 0.06, w: 1.3, h: 0.12, mass: 50, label: '' });
+      add('track', { a: free(0, 0.06), b: free(0, 6), show: false, host: 'ground', width: 4 });   // the shaft's guide rails
+      ctx.main = ctx.person = add('block', { x: 0.25, y: 0.42, w: 0.3, h: 0.6, mass: 60, fill: 'white', label: 'm' });
+      // Cable tension: hold (M + m)g, then accelerate up at 2 m/s² for 1 s, coast 1.5 s, brake at 2 m/s² for 1 s.
+      add('force', { p: R(ctx.plat, 't25'), angle: 90, len: 0.9, law: '110*(9.81 + 2*step(1 - t) - 2*step(t - 2.5)*step(3.5 - t))', label: 'T(t)' });
+    },
+    show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'force', body: c.person.id, force: 'cn:b:' + c.plat.id, comp: 'm' }, { kind: 'vel', body: c.plat.id }],
+    notes: ['A 60 kg person stands on a 50 kg elevator floor that rides guide rails. The cable pulls T(t): it speeds up at 2 m/s² for 1 s, moves at a steady 2 m/s, then brakes at 2 m/s² for 1 s.',
+      'The floor\'s normal force on the person is what a bathroom scale would read: N = m(g + a). Textbook: 708.6 N speeding up, 588.6 N (their true weight) at steady speed, 468.6 N while braking.',
+      'Try: change the cable law to 0 (cable snaps): N drops to 0 and the person floats in free fall with the floor.'],
+    check(sc, c) {
+      const at = [0.5, 1.8, 3.0], want = [11.81, 9.81, 7.81].map((g) => 60 * g), got = [];
+      simulate(sc, 3.05, (s) => { const i = at.findIndex((t) => s.steps === Math.round(t / s.dt)); if (i >= 0) got[i] = ledgerF(s, c.person, 'cn:b:' + c.plat.id); });
+      return { meas: 'N = ' + got.map((x) => x.toFixed(1)).join(', ') + ' N', exp: want.map((x) => x.toFixed(1)).join(', ') + ' (±1%)', pass: got.length === 3 && got.every((x, i) => relErr(x, want[i]) <= 0.01) };
+    },
+  },
+  movingPulley: {
+    name: 'Moving pulley: 2-to-1 advantage', topic: T_FOR,
+    build(add, R, sc, ctx) {
+      ceiling(add, -0.7, 1.3, 3.5);
+      const P2 = add('pulley', { x: 0.6, y: 3.1, r: 0.3, mount: 'ground', mountAngle: 90, mountLen: 30 });
+      const P1 = add('pulley', { x: 0, y: 1.6, r: 0.3, mass: 0, fixed: false, collide: false });
+      ctx.main = add('block', { x: 0.9, y: 1.6, w: 0.25, h: 0.25, mass: 2, label: 'm_1', labelDx: 0.35 });
+      ctx.load = add('block', { x: 0, y: 0.7, w: 0.35, h: 0.3, mass: 3, label: 'M', labelDx: 0.42 });
+      add('rope', { a: free(-0.3, 3.5), b: R(ctx.main, 't'), via: [{ id: P1.id, s: 1 }, { id: P2.id, s: -1 }] });
+      add('rope', { a: R(P1, 'c'), b: R(ctx.load, 't') });
+    },
+    show: { fbd: true, graphs: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'vel', body: c.load.id }],
+    notes: ['One rope runs from the ceiling, under a massless moving pulley that carries M = 3 kg, over a fixed pulley, down to m₁ = 2 kg. Two rope segments hold the load, so it feels 2T.',
+      'Constraint: when m₁ moves down 2 cm the load rises 1 cm, so a₁ = 2a_M. Newton: m₁g − T = m₁a₁ and 2T − Mg = M a₁/2.',
+      'Textbook: a₁ = 2g(2m₁ − M)/(M + 4m₁) = 1.784 m/s² down, a_M = 0.892 m/s² up, T = m₁(g − a₁) = 16.05 N. A 2 kg mass lifts 3 kg: force is doubled, distance halved, work the same.'],
+    check(sc, c) { const a = accelOf(sc, c.main, { x: 0, y: -1 }, 0.3, 0.8).a, w = 2 * 9.81 * (4 - 3) / (3 + 8); return { meas: `a₁ = ${a.toFixed(4)} m/s²`, exp: `${w.toFixed(3)} ±1%`, pass: relErr(a, w) <= 0.01 }; },
+  },
+  seesaw: {
+    name: 'Balanced seesaw (static equilibrium)', topic: T_ROT,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -2.4, y: 0 }, { x: 2.4, y: 0 }], side: 1 });
+      ctx.main = add('rod', { ...rodGeom({ x: -2, y: 0.9 }, { x: 2, y: 0.9 }), mass: 2, width: 8, label: '' });
+      add('pin', { p: R(ctx.main, 'm'), mount: 'ground', mountAngle: -90, mountLen: 86 });
+      const top = 0.9 + rodHalfThick(ctx.main);
+      add('block', { x: -1.2, y: top + 0.15, w: 0.3, h: 0.3, mass: 4, label: 'm_1' });
+      add('block', { x: 1.6, y: top + 0.15, w: 0.3, h: 0.3, mass: 3, label: 'm_2' });
+      add('dim', { a: free(-1.2, top + 0.3), b: free(0, top + 0.3), off: 0.35, label: 'd_1' });
+      add('dim', { a: free(0, top + 0.3), b: free(1.6, top + 0.3), off: 0.35, label: 'd_2' });
+    },
+    show: { fbd: true }, graphs: () => [{ kind: 'energy' }],
+    notes: ['A uniform 2 kg, 4 m board on a pivot at its middle. m₁ = 4 kg sits 1.2 m left of the pivot, m₂ = 3 kg sits 1.6 m right.',
+      'Static equilibrium needs ΣF = 0 and Στ = 0. Torques about the pivot: m₁g d₁ = 4·9.81·1.2 = 47.1 N·m counterclockwise, m₂g d₂ = 3·9.81·1.6 = 47.1 N·m clockwise. They cancel, so it stays put.',
+      'ΣF = 0: the pivot pushes up with (2 + 4 + 3)g = 88.3 N (select the board with the FBD on).',
+      'Try: slide m₂ to 1.4 m and run it. Now Στ ≠ 0 and the board tips toward m₁.'],
+    check(sc, c) {
+      let wmax = 0, Rp = 0;
+      simulate(sc, 2, (s) => { wmax = Math.max(wmax, Math.abs(recOf(s, c.main).getAngularVelocity())); Rp = ledgerF(s, c.main, 'jt:'); });
+      return { meas: `|ω| ≤ ${wmax.toExponential(1)} rad/s, pivot force ${Rp.toFixed(2)} N`, exp: 'stays balanced (< 1e-3 rad/s); 88.29 N ±0.5%', pass: wmax < 1e-3 && relErr(Rp, 9 * 9.81) <= 0.005 };
+    },
+  },
+  verticalSpring: {
+    name: 'Mass hanging on a spring', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      ceiling(add, -0.6, 0.6, 2);
+      const yEq = 2 - 0.6 - 0.5 * 9.81 / 20 - 0.15;
+      ctx.main = add('block', { x: 0, y: yEq - 0.1, w: 0.3, h: 0.3, mass: 0.5, label: 'm', labelDx: 0.35 });
+      add('spring', { a: free(0, 2), b: R(ctx.main, 't'), k: 20, restLen: 0.6, coils: 10, label: 'k' });
+      add('line', { a: free(-0.45, yEq), b: free(0.45, yEq), dash: 'dashed' });
+      add('text', { p: free(1.0, yEq), label: '\\text{equilibrium}' });
+    },
+    show: { graphs: true, fbd: true }, graphs: (c) => [{ kind: 'pos', body: c.main.id }, { kind: 'energy' }],
+    notes: ['A 0.5 kg block on a k = 20 N/m spring (rest length 0.6 m) hangs from the ceiling, pulled 10 cm below equilibrium and released.',
+      'Gravity only moves the center of the motion: the spring stretches mg/k = 24.5 cm at equilibrium (dashed line), and the block oscillates about that line with the same period as on a level floor.',
+      'Textbook: T = 2π√(m/k) = 0.993 s, amplitude 10 cm, v_max = Aω = 0.632 m/s.',
+      'Try: the energy graph. U_g and U_s both change, but measured from equilibrium the total is just ½k(y − y_eq)² + ½mv².'],
+    check(sc, c) {
+      const yEq = 2 - 0.6 - 0.5 * 9.81 / 20 - 0.15, ts = [], vs = [];
+      let lo = Infinity, hi = -Infinity;
+      simulate(sc, 4, (s) => { const b = recOf(s, c.main), y = b.getWorldCenter().y; lo = Math.min(lo, y); hi = Math.max(hi, y); ts.push(s.t); vs.push(b.getLinearVelocity().y); });
+      const T = periodFromCrossings(ts, vs), mid = (lo + hi) / 2, w = TAU * Math.sqrt(0.5 / 20);
+      return { meas: `T = ${T.toFixed(4)} s, centered on y = ${mid.toFixed(4)} m`, exp: `${w.toFixed(4)} s ±1%, y = ${yEq.toFixed(4)} m ±1 mm`, pass: relErr(T, w) <= 0.01 && Math.abs(mid - yEq) <= 0.001 };
+    },
+  },
+  damping: {
+    name: 'Damping: under, critical and over', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      ctx.rows = [[2.4, 2, '\\zeta = 0.1\\ \\text{(under)}'], [1.2, 20, '\\zeta = 1\\ \\text{(critical)}'], [0, 50, '\\zeta = 2.5\\ \\text{(over)}']].map(([y, cD, tex]) => {
+        const b = smRow(add, R, y, 0.2, { c: cD, labelK: 'k', labelC: 'c' });
+        add('text', { p: free(1.15, y + 0.6), label: tex });
+        return b;
+      });
+      ctx.main = ctx.rows[0];
+    },
+    show: { graphs: true }, graphs: (c) => c.rows.map((b) => ({ kind: 'pos', body: b.id })),
+    notes: ['Three 1 kg blocks on k = 100 N/m springs (ω₀ = 10 rad/s), pulled 20 cm and released, with dampers c = 2, 20 and 50 N·s/m. The damping ratio is ζ = c / 2√(km).',
+      'Underdamped (ζ = 0.1): it oscillates at ωd = √(ω₀² − (c/2m)²) = 9.95 rad/s (Td = 0.631 s) inside an envelope 0.2e^(−ct/2m).',
+      'Critical (ζ = 1): the fastest return with no overshoot, x = x₀(1 + ω₀t)e^(−ω₀t) (3.98 cm at t = 0.3 s). Overdamped (ζ = 2.5): it creeps back more slowly (11.2 cm at t = 0.3 s).',
+      'Try: car shocks are set a bit under critical (ζ ≈ 0.3). Open the car preset to see why.'],
+    check(sc, c) {
+      const [u, cr, ov] = c.rows, ts = [], vs = [];
+      let xc = NaN, xo = NaN;
+      simulate(sc, 3, (s) => { ts.push(s.t); vs.push(recOf(s, u).getLinearVelocity().x); if (s.steps === Math.round(0.3 / s.dt)) { xc = recOf(s, cr).getWorldCenter().x; xo = recOf(s, ov).getWorldCenter().x; } });
+      const Td = periodFromCrossings(ts, vs), wTd = TAU / Math.sqrt(99), wc = 0.2 * 4 * Math.exp(-3);
+      const s1 = -10 * (2.5 - Math.sqrt(5.25)), s2 = -10 * (2.5 + Math.sqrt(5.25)), wo = 0.2 * (s2 * Math.exp(0.3 * s1) - s1 * Math.exp(0.3 * s2)) / (s2 - s1);
+      return { meas: `Td = ${Td.toFixed(4)} s; x(0.3 s) = ${(100 * xc).toFixed(3)}, ${(100 * xo).toFixed(3)} cm`, exp: `${wTd.toFixed(4)} s ±1%; ${(100 * wc).toFixed(3)}, ${(100 * wo).toFixed(3)} cm ±2%`,
+        pass: relErr(Td, wTd) <= 0.01 && relErr(xc, wc) <= 0.02 && relErr(xo, wo) <= 0.02 };
+    },
+  },
+  resonance: {
+    name: 'Driven oscillator: resonance', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      ctx.rows = [[2.4, 5, '\\omega = 0.5\\,\\omega_0'], [1.2, 10, '\\omega = \\omega_0'], [0, 15, '\\omega = 1.5\\,\\omega_0']].map(([y, w, tex]) => {
+        const b = smRow(add, R, y, 0, { c: 2, labelK: 'k', labelC: 'c' });
+        add('force', { p: R(b, 'r'), angle: 0, len: 0.5, law: `4*sin(${w}*t)`, label: 'F(t)' });
+        add('text', { p: free(1.3, y + 0.6), label: tex });
+        return b;
+      });
+      ctx.main = ctx.rows[1];
+    },
+    show: { graphs: true }, graphs: (c) => c.rows.map((b) => ({ kind: 'pos', body: b.id })),
+    notes: ['Three identical oscillators (m = 1 kg, k = 100 N/m, c = 2 N·s/m, so ω₀ = 10 rad/s) driven by F = 4 sin ωt N at half, exactly, and 1.5 times their natural frequency.',
+      'After the start-up wiggles die out (time constant 2m/c = 1 s), each settles at the driving frequency with amplitude A = (F₀/m)/√((ω₀² − ω²)² + (cω/m)²): 5.29 cm, 20.0 cm and 3.11 cm.',
+      'At resonance the motion lags the force by 90°, so the force always pushes in the direction of motion and pumps in energy until the damper takes it out as fast.',
+      'Try: halve c. The resonant amplitude doubles (A = F₀/cω₀) and takes twice as long to build up.'],
+    check(sc, c) {
+      const amp = c.rows.map(() => 0);
+      simulate(sc, 9, (s) => { if (s.t >= 7) c.rows.forEach((b, i) => { amp[i] = Math.max(amp[i], Math.abs(recOf(s, b).getWorldCenter().x)); }); });
+      const want = [5, 10, 15].map((w) => 4 / Math.sqrt((100 - w * w) ** 2 + (2 * w) ** 2));
+      return { meas: 'amplitudes ' + amp.map((a) => (100 * a).toFixed(2)).join(', ') + ' cm', exp: want.map((a) => (100 * a).toFixed(2)).join(', ') + ' cm (±3%)', pass: amp.every((a, i) => relErr(a, want[i]) <= 0.03) };
+    },
+  },
+  coupled: {
+    name: 'Coupled oscillators: normal modes and beats', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1.5, y: -0.1 }, { x: -1.5, y: 2.9 }], side: -1 });
+      add('surface', { kind: 'line', pts: [{ x: 1.5, y: -0.1 }, { x: 1.5, y: 2.9 }], side: 1 });
+      ctx.rows = [[2.0, 0.1, 0.1, '\\text{in phase}'], [1.0, 0.1, -0.1, '\\text{opposite}'], [0, 0.1, 0, '\\text{one pushed: beats}']].map(([y, d1, d2, tex]) => {
+        add('surface', { kind: 'line', pts: [{ x: -1.5, y }, { x: 1.5, y }], side: 1, mu_s: 0, mu_k: 0 });
+        const A = add('block', { x: -0.5 + d1, y: y + 0.15, w: 0.3, h: 0.3, mass: 1, label: '' });
+        const B = add('block', { x: 0.5 + d2, y: y + 0.15, w: 0.3, h: 0.3, mass: 1, label: '' });
+        add('spring', { a: free(-1.5, y + 0.15), b: R(A, 'l'), k: 100, restLen: 0.85, coils: 6, label: y === 2 ? 'k' : '' });
+        add('spring', { a: R(A, 'r'), b: R(B, 'l'), k: 20, restLen: 0.7, coils: 6, label: y === 2 ? 'k_c' : '' });
+        add('spring', { a: R(B, 'r'), b: free(1.5, y + 0.15), k: 100, restLen: 0.85, coils: 6, label: y === 2 ? 'k' : '' });
+        add('text', { p: free(0, y + 0.6), label: tex });
+        return [A, B];
+      });
+      ctx.main = ctx.rows[2][0];
+    },
+    show: { graphs: true }, graphs: (c) => [{ kind: 'pos', body: c.rows[2][0].id }, { kind: 'pos', body: c.rows[2][1].id }],
+    notes: ['Two 1 kg blocks between walls on springs k = 100 N/m, joined by a weaker k_c = 20 N/m. A 2-mass system has two normal modes, each a pure sine wave.',
+      'In phase (top): the middle spring never stretches, ω₁ = √(k/m) = 10 rad/s, T₁ = 0.628 s. Opposite (middle): it stretches twice as much, ω₂ = √((k + 2k_c)/m) = 11.83 rad/s, T₂ = 0.531 s.',
+      'Bottom: only the left block is pulled. That\'s half of each mode, and the two drift in and out of step: the motion passes back and forth between the blocks every 2π/(ω₂ − ω₁) = 3.43 s (beats). Watch the two position graphs.'],
+    check(sc, c) {
+      const ts = [], v1 = [], v2 = [];
+      simulate(sc, 3, (s) => { ts.push(s.t); v1.push(recOf(s, c.rows[0][0]).getLinearVelocity().x); v2.push(recOf(s, c.rows[1][0]).getLinearVelocity().x); });
+      const T1 = periodFromCrossings(ts, v1), T2 = periodFromCrossings(ts, v2), w1 = TAU / 10, w2 = TAU / Math.sqrt(140);
+      return { meas: `T₁ = ${T1.toFixed(4)}, T₂ = ${T2.toFixed(4)} s`, exp: `${w1.toFixed(4)}, ${w2.toFixed(4)} (±1%)`, pass: relErr(T1, w1) <= 0.01 && relErr(T2, w2) <= 0.01 };
+    },
+  },
+  twoBody: {
+    name: 'Two-body oscillator (reduced mass)', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1, y: 0 }, { x: 2.6, y: 0 }], side: 1, mu_s: 0, mu_k: 0 });
+      ctx.a = add('block', { x: 0, y: 0.15, w: 0.3, h: 0.3, mass: 1, label: 'm_1' });
+      ctx.b = add('block', { x: 1.5, y: 0.2, w: 0.4, h: 0.4, mass: 3, label: 'm_2' });
+      add('spring', { a: R(ctx.a, 'r'), b: R(ctx.b, 'l'), k: 75, restLen: 0.95, coils: 8, label: 'k' });
+      ctx.main = ctx.a;
+    },
+    show: { graphs: true, com: true }, graphs: (c) => [{ kind: 'pos', body: c.a.id }, { kind: 'pos', body: c.b.id }, { kind: 'mom' }],
+    notes: ['A 1 kg and a 3 kg block on a frictionless floor, joined by a k = 75 N/m spring stretched 20 cm, released from rest. No outside horizontal force, so the center of mass (the marker) never moves.',
+      'Each block oscillates about the center of mass. The pair behaves like one mass μ = m₁m₂/(m₁ + m₂) = 0.75 kg on the spring: ω = √(k/μ) = 10 rad/s, T = 0.628 s for both.',
+      'The light block swings 3 times as far as the heavy one (m₁x₁ = m₂x₂), and momentum stays zero the whole time.'],
+    check(sc, c) {
+      const ts = [], vs = [];
+      let x0 = null, drift = 0;
+      simulate(sc, 3, (s) => { ts.push(s.t); vs.push(recOf(s, c.a).getLinearVelocity().x); const x = s.momentum().com.x; if (x0 === null) x0 = x; drift = Math.max(drift, Math.abs(x - x0)); });
+      const T = periodFromCrossings(ts, vs), w = TAU / 10;
+      return { meas: `T = ${T.toFixed(4)} s, center of mass drifts ${(1000 * drift).toFixed(3)} mm`, exp: `${w.toFixed(4)} s ±1%, < 1 mm`, pass: relErr(T, w) <= 0.01 && drift < 0.001 };
+    },
+  },
+  rollingSpring: {
+    name: 'Rolling disk on a spring', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      for (const y of [0, 1.0]) add('surface', { kind: 'line', pts: [{ x: -1.2, y }, { x: 1.4, y }], side: 1, mu_s: y ? 0.5 : 0, mu_k: y ? 0.4 : 0 });
+      add('surface', { kind: 'line', pts: [{ x: -1.2, y: -0.1 }, { x: -1.2, y: 1.9 }], side: -1 });
+      ctx.disk = add('disk', { x: 0.2, y: 1.25, r: 0.25, mass: 2, label: 'm', labelDx: 0, labelDy: 0.42 });
+      add('spring', { a: free(-1.2, 1.25), b: R(ctx.disk, 'c'), k: 60, restLen: 1.2, coils: 8, label: 'k' });
+      ctx.block = add('block', { x: 0.2, y: 0.25, w: 0.5, h: 0.5, mass: 2, label: 'm' });
+      add('spring', { a: free(-1.2, 0.25), b: R(ctx.block, 'l'), k: 60, restLen: 0.95, coils: 8, label: 'k' });
+      add('text', { p: free(0.9, 1.75), label: '\\text{rolls}' }); add('text', { p: free(0.9, 0.75), label: '\\text{slides (no friction)}' });
+      ctx.main = ctx.disk;
+    },
+    show: { graphs: true, rolling: true }, graphs: (c) => [{ kind: 'pos', body: c.disk.id }, { kind: 'pos', body: c.block.id }],
+    notes: ['Top: a 2 kg solid disk rolls without slipping, its axle tied to a k = 60 N/m spring. Bottom: a 2 kg block on the same spring slides on ice. Both start 20 cm out.',
+      'The rolling disk has to spin up as well as speed up, so it acts heavier: K = ½mv² + ½(½mr²)(v/r)² = ½(3m/2)v². Textbook: T = 2π√(3m/2k) = 1.405 s, versus 2π√(m/k) = 1.147 s for the block.',
+      'Static friction does the spinning: f = kx/3 at most (4 N here), well under μs mg = 9.8 N, so it never slips.'],
+    check(sc, c) {
+      const ts = [], v1 = [], v2 = [];
+      simulate(sc, 4.5, (s) => { ts.push(s.t); v1.push(recOf(s, c.disk).getLinearVelocity().x); v2.push(recOf(s, c.block).getLinearVelocity().x); });
+      const T1 = periodFromCrossings(ts, v1), T2 = periodFromCrossings(ts, v2), w1 = TAU * Math.sqrt(3 * 2 / (2 * 60)), w2 = TAU * Math.sqrt(2 / 60);
+      return { meas: `T = ${T1.toFixed(4)} s (disk), ${T2.toFixed(4)} s (block)`, exp: `${w1.toFixed(4)}, ${w2.toFixed(4)} (±1%)`, pass: relErr(T1, w1) <= 0.01 && relErr(T2, w2) <= 0.01 };
+    },
+  },
+  bigPendulum: {
+    name: 'Large-amplitude pendulums', topic: T_OSC,
+    build(add, R, sc, ctx) {
+      ceiling(add, -3.2, 3.2, 2.5);
+      ctx.amps = [10, 90, 160]; ctx.pivots = []; ctx.bobs = [];
+      ctx.amps.forEach((a, i) => {
+        const pv = { x: -2.2 + 2.2 * i, y: 2.5 }, end = along(-90 + a, 1, pv);
+        add('pin', { p: free(pv.x, pv.y) });
+        add('rod', { ...rodGeom(pv, end), mass: 0, width: 2 });
+        ctx.bobs.push(add('pointmass', { ...end, style: 'bob', size: 9, mass: 1, collide: false, label: '' }));
+        ctx.pivots.push(pv);
+        add('text', { p: free(pv.x, 0.9), label: `\\theta_0 = ${a}^\\circ` });
+      });
+      ctx.main = ctx.bobs[1];
+    },
+    frame: { x0: -3.3, y0: 1.3, x1: 3.3, y1: 3.6 },
+    show: { trails: true }, trailSec: 2, graphs: () => [],
+    notes: ['Three identical 1 m pendulums released from 10°, 90° and 160°. The small-angle formula T = 2π√(L/g) = 2.006 s ignores the amplitude.',
+      'Exact: T = 2π√(L/g) / AGM(1, cos(θ₀/2)), where AGM is the arithmetic-geometric mean (it\'s the elliptic integral K in disguise). That gives 2.010 s, 2.368 s and 4.027 s: at 160° the period has doubled.',
+      'They start together and fall out of step at once. The 160° one creeps slowly over the top because it starts so close to straight up.'],
+    check(sc, c) {
+      const ts = [], th = c.bobs.map(() => []);
+      simulate(sc, 5.5, (s) => { ts.push(s.t); c.bobs.forEach((b, i) => { const p = recOf(s, b).getWorldCenter(), pv = c.pivots[i]; th[i].push(Math.atan2(p.x - pv.x, pv.y - p.y)); }); });
+      // Near 160° the period is very sensitive to amplitude (losing 1% of mgL to the solver costs 3%), so that one gets 1.5%.
+      const T0 = TAU * Math.sqrt(1 / 9.81), want = c.amps.map((a) => T0 / agm(1, Math.cos(toRad(a) / 2))), got = th.map((v) => periodFromCrossings(ts, v)), tol = [0.01, 0.01, 0.015];
+      return { meas: 'T = ' + got.map((t) => t.toFixed(3)).join(', ') + ' s', exp: want.map((t) => t.toFixed(3)).join(', ') + ' (±1%, ±1%, ±1.5%)', pass: got.every((t, i) => relErr(t, want[i]) <= tol[i]) };
+    },
+  },
+  ballistic: {
+    name: 'Ballistic pendulum', topic: T_MOM,
+    build(add, R, sc, ctx) {
+      ceiling(add, -0.8, 0.8, 2.5);
+      ctx.main = add('block', { x: 0, y: 1.0, w: 0.4, h: 0.3, mass: 1.9, label: 'M' });
+      // Two parallel strings: the block swings without tilting, so its center traces a circle.
+      add('rope', { a: free(-0.2, 2.5), b: R(ctx.main, 'tl') });
+      add('rope', { a: free(0.2, 2.5), b: R(ctx.main, 'tr') });
+      ctx.bullet = add('pointmass', { x: -1.4, y: 1.0, mass: 0.1, size: 5, vx: 20, stick: true, label: 'm', labelDy: 0.18 });
+      add('dim', { a: free(0.55, 2.5), b: free(0.55, 1.15), orient: 'vertical', off: 0, label: 'L' });
+    },
+    show: { graphs: true, vel: true }, graphs: (c) => [{ kind: 'mom' }, { kind: 'energy' }],
+    notes: ['A 0.1 kg bullet at 20 m/s embeds itself in a 1.9 kg block hanging from two parallel strings (so the block swings without tilting).',
+      'The hit is so fast the strings don\'t have time to swing, so horizontal momentum is conserved: v′ = mv/(m + M) = 1.00 m/s. Kinetic energy is not: 20 J goes in, 1 J is left. 95% turns to heat (watch E_thermal jump).',
+      'After the hit, energy is conserved on the swing: the block rises h = v′²/2g = 5.10 cm. Measure h and you can work backward to the bullet\'s speed: that\'s how it was used for real.'],
+    check(sc, c) {
+      let vmax = 0, ymax = -Infinity;
+      simulate(sc, 1.2, (s) => { const b = recOf(s, c.main); vmax = Math.max(vmax, b.getLinearVelocity().x); ymax = Math.max(ymax, b.getWorldCenter().y); });
+      const h = ymax - c.main.y, vw = 0.1 * 20 / 2, hw = vw * vw / (2 * 9.81);
+      return { meas: `v′ = ${vmax.toFixed(4)} m/s, rises ${(100 * h).toFixed(3)} cm`, exp: `${vw.toFixed(3)} m/s ±1%, ${(100 * hw).toFixed(3)} cm ±2%`, pass: relErr(vmax, vw) <= 0.01 && relErr(h, hw) <= 0.02 };
+    },
+  },
+  explode: {
+    name: 'Carts pushed apart (explosion)', topic: T_MOM,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'polyline', pts: [{ x: -3.5, y: 0.8 }, { x: -3.5, y: 0 }, { x: 3.5, y: 0 }, { x: 3.5, y: 0.8 }], side: 1, mu_s: 0, mu_k: 0 });
+      ctx.a = add('cart', { x: -0.45, y: 0.31, w: 0.6, h: 0.3, wheelR: 0.08, mass: 1, label: 'm_A' });
+      ctx.b = add('cart', { x: 0.6, y: 0.31, w: 0.9, h: 0.3, wheelR: 0.08, mass: 3, label: 'm_B' });
+      add('actuator', { a: R(ctx.a, 'r'), b: R(ctx.b, 'l'), law: '30*step(0.1 - t)', restLen: 0.3, label: 'F(t)' });
+      ctx.main = ctx.a;
+    },
+    show: { graphs: true, vel: true, com: true }, graphs: (c) => [{ kind: 'mom' }, { kind: 'vel', body: c.a.id }, { kind: 'vel', body: c.b.id }],
+    notes: ['A 1 kg and a 3 kg cart at rest on a frictionless track. A spring-loaded plunger between them pushes them apart with F = 30 N for 0.1 s.',
+      'The push is internal: equal and opposite impulses J = FΔt = 3 N·s on each cart. Total momentum stays 0, so v_A = −J/m_A = −3 m/s and v_B = J/m_B = +1 m/s, and the center of mass (marker) stays put.',
+      'Kinetic energy goes from 0 to ½(1)(3²) + ½(3)(1²) = 6 J: the plunger did that work (W_in in the energy panel). The light cart gets ¾ of it.'],
+    check(sc, c) {
+      const sim = simulate(sc, 0.5), va = recOf(sim, c.a).getLinearVelocity().x, vb = recOf(sim, c.b).getLinearVelocity().x, p = sim.momentum().px;
+      return { meas: `v_A = ${va.toFixed(4)}, v_B = ${vb.toFixed(4)} m/s, p = ${p.toFixed(5)} kg·m/s`, exp: '−3, +1 m/s (±1%), p = 0', pass: relErr(va, -3) <= 0.01 && relErr(vb, 1) <= 0.01 && Math.abs(p) < 0.01 };
+    },
+  },
+  bounce: {
+    name: 'Bouncing balls (coefficient of restitution)', topic: T_MOM,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1.2, y: 0 }, { x: 1.2, y: 0 }], side: 1 });
+      ctx.balls = [1, 0.8, 0.5].map((e, i) => {
+        add('text', { p: free(-0.7 + 0.7 * i, -0.35), label: `e = ${e}` });
+        return add('disk', { x: -0.7 + 0.7 * i, y: 2.1, r: 0.1, mass: 0.5, e, label: '', centerPin: false, fill: i ? 'gray' : 'white' });
+      });
+      add('dim', { a: free(-1.05, 0), b: free(-1.05, 2.0), orient: 'vertical', off: 0, label: 'h_0' });
+      ctx.main = ctx.balls[1];
+    },
+    show: { graphs: true, trails: true }, trailSec: 3, graphs: (c) => [{ kind: 'pos', body: c.balls[1].id }, { kind: 'energy' }],
+    notes: ['Three balls dropped from h₀ = 2 m with coefficients of restitution e = 1, 0.8 and 0.5. e is the ratio of speeds just after and just before a bounce.',
+      'Speed scales by e each bounce, and height goes as speed², so each bounce reaches e² of the last: 2 m, 1.28 m then 0.82 m for e = 0.8; 0.5 m for e = 0.5. The e = 1 ball comes back to 2 m every time.',
+      'Each bounce of an e = 0.8 ball turns 1 − e² = 36% of its kinetic energy into heat (E_thermal steps up).'],
+    check(sc, c) {
+      const peaks = c.balls.map(() => []), prev = c.balls.map(() => 0);
+      simulate(sc, 3.2, (s) => c.balls.forEach((b, i) => { const B = recOf(s, b), vy = B.getLinearVelocity().y; if (prev[i] > 0 && vy <= 0) peaks[i].push(B.getWorldCenter().y - 0.1); prev[i] = vy; }));
+      const got = [peaks[0][0], peaks[1][0], peaks[1][1], peaks[2][0]], want = [2, 1.28, 0.8192, 0.5];
+      return { meas: 'peaks ' + got.map((h) => (h || NaN).toFixed(4)).join(', ') + ' m', exp: want.join(', ') + ' (±1.5%)', pass: got.every((h, i) => relErr(h, want[i]) <= 0.015) };
+    },
+  },
+  ladder: {
+    name: 'Ladder sliding down a frictionless wall', topic: T_ROT,
+    build(add, R, sc, ctx) {
+      ctx.wall = add('surface', { kind: 'line', pts: [{ x: 0, y: 0 }, { x: 0, y: 2.3 }], side: -1, mu_s: 0, mu_k: 0 });
+      add('surface', { kind: 'line', pts: [{ x: 0, y: 0 }, { x: 2.6, y: 0 }], side: 1, mu_s: 0, mu_k: 0 });
+      // Place the 2 m rod at 70° with its corners just touching the wall and the floor.
+      const th = toRad(70), L = 2, hw = 3 / 2 / sc.settings.pxPerM;
+      ctx.main = add('rod', { x: Math.cos(th) * L / 2 + Math.sin(th) * hw, y: Math.sin(th) * L / 2 + Math.cos(th) * hw, len: L, angle: Math.PI - th, mass: 1, width: 3, label: 'L', labelDx: 0.25, labelDy: 0.1 });
+      add('angle', { v: free(Math.cos(th) * L, 0), r: free(Math.cos(th) * L - 0.7, 0), t: free(0, Math.sin(th) * L), rad: 0.45, arrows: 'none', showRef: true, label: '\\theta' });
+    },
+    show: { fbd: true, graphs: true, com: true }, graphs: (c) => [{ kind: 'force', body: c.main.id, force: 'cn:b:' + c.wall.id, comp: 'm' }, { kind: 'vel', body: c.main.id }],
+    notes: ['A 2 m, 1 kg ladder starts at rest at θ₀ = 70° against a frictionless wall on a frictionless floor.',
+      'While both ends touch, the center of mass moves on a circle of radius L/2 about the corner. Energy gives θ̇² = (3g/L)(sin θ₀ − sin θ), and the wall\'s push N_w = m ẍ_cm = (3mg/4) cos θ (3 sin θ − 2 sin θ₀).',
+      'N_w hits zero, and the top leaves the wall, when sin θ = ⅔ sin θ₀: θ = 38.8°, with the top at ⅔ of its starting height. From then on nothing pushes sideways, so the center of mass\'s horizontal velocity stays constant.',
+      'Try: the force graph shows N_w falling to zero. Select the ladder with the FBD on to see the floor\'s push stay vertical.'],
+    check(sc, c) {
+      let th = NaN, started = false;
+      simulate(sc, 1.5, (s) => {
+        if (!isNaN(th)) return;
+        const r = s.recs.get(c.main.id), e = r.ledger.get('cn:b:' + c.wall.id), N = e && e.active ? Math.hypot(e.F.x, e.F.y) : 0;
+        if (N > 0.05) started = true;
+        if (started && N <= 0.002 * 9.81) th = 180 - toDeg(r.body.getAngle());
+      });
+      const want = toDeg(Math.asin(2 / 3 * Math.sin(toRad(70))));
+      return { meas: `leaves the wall at θ = ${th.toFixed(2)}°`, exp: `${want.toFixed(2)}° (sin θ = ⅔ sin θ₀) ±1°`, pass: Math.abs(th - want) <= 1 };
+    },
+  },
+  skid: {
+    name: 'Bowling ball: skidding into rolling', topic: T_ROT,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -0.5, y: 0 }, { x: 9.5, y: 0 }], side: 1, mu_s: 0.25, mu_k: 0.2 });
+      ctx.main = add('disk', { x: 0, y: 0.11, r: 0.11, shape: 'sphere', mass: 7, vx: 6, label: 'm', labelDy: 0.3 });
+      add('line', { a: free(4.494, -0.05), b: free(4.494, 0.45), dash: 'dashed' });
+      add('text', { p: free(4.494, 0.6), label: '\\text{rolling starts}' });
+    },
+    show: { graphs: true, rolling: true, omega: true }, graphs: (c) => [{ kind: 'vel', body: c.main.id }, { kind: 'omega', body: c.main.id }],
+    notes: ['A 7 kg bowling ball (solid sphere, r = 11 cm) is thrown at 6 m/s with no spin onto a lane with μk = 0.2. It skids: kinetic friction slows it down and spins it up.',
+      'Linear: v = v₀ − μk g t. Angular: ω = (μk m g r / I) t = (5μk g / 2r) t. It rolls when v = ωr: t = 2v₀/(7μk g) = 0.874 s, at v = 5v₀/7 = 4.29 m/s, after 4.49 m (dashed line).',
+      'Shortcut: friction acts at the contact point, so angular momentum about any point on the floor is conserved: m v₀ r = m v r + I v/r gives v = 5v₀/7 directly. After that, no friction at all: it rolls on forever.'],
+    check(sc, c) {
+      // Rolling starts when friction stops spinning it up: ω levels off at its final value.
+      const ts = [], ws = [];
+      let v = 0;
+      simulate(sc, 2, (s) => { const b = recOf(s, c.main); v = b.getLinearVelocity().x; ts.push(s.t); ws.push(b.getAngularVelocity()); });
+      const tRoll = ts[ws.findIndex((w) => Math.abs(w - ws[ws.length - 1]) < 0.05)], vw = 5 / 7 * 6, tw = 2 * 6 / (7 * 0.2 * 9.81);
+      return { meas: `rolls at t = ${tRoll.toFixed(4)} s, v = ${v.toFixed(4)} m/s`, exp: `${tw.toFixed(4)} s ±2%, ${vw.toFixed(4)} m/s ±0.5%`, pass: relErr(tRoll, tw) <= 0.02 && relErr(v, vw) <= 0.005 };
+    },
+  },
+  meterStick: {
+    name: 'Falling meter stick and a coin', topic: T_ROT,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -0.6, y: 0 }, { x: 1.6, y: 0 }], side: 1 });
+      ctx.main = add('rod', { ...rodGeom({ x: 0, y: 1.3 }, { x: 1, y: 1.3 }), mass: 0.5, width: 6, label: 'L', labelDy: 0.25 });
+      add('pin', { p: R(ctx.main, 'a'), mount: 'ground', mountAngle: -90, mountLen: 30 });
+      ctx.coin = add('disk', { x: 0.95, y: 1.3 + rodHalfThick(ctx.main) + 0.04, r: 0.04, mass: 0.005, fill: 'white', label: '', centerPin: false });
+    },
+    show: { graphs: true, acc: true }, graphs: (c) => [{ kind: 'omega', body: c.main.id }, { kind: 'vel', body: c.coin.id }],
+    notes: ['A 1 m stick pinned at one end is released level, with a coin resting near the free end.',
+      'Torque about the pin: τ = mg L/2 and I = mL²/3, so α = τ/I = 3g/2L = 14.7 rad/s². The free end starts down at αL = 3g/2 = 14.7 m/s², faster than g.',
+      'The coin can only fall at g, so the stick drops out from under it. Points beyond 2L/3 from the pin start faster than free fall.',
+      'Try: move the coin to 0.5 m (it stays on, since 0.5 < 2L/3) or 0.7 m (it lifts off).'],
+    check(sc, c) {
+      let w = NaN, vc = NaN;
+      simulate(sc, 0.2, (s) => { if (s.steps === 12) w = Math.abs(recOf(s, c.main).getAngularVelocity()); vc = recOf(s, c.coin).getLinearVelocity().y; });
+      const al = w / 0.05, want = 1.5 * 9.81;
+      return { meas: `α = ${al.toFixed(3)} rad/s²; coin v_y(0.2 s) = ${vc.toFixed(4)} m/s`, exp: `${want.toFixed(3)} ±1%; −1.962 (free fall) ±1%`, pass: relErr(al, want) <= 0.01 && relErr(vc, -0.2 * 9.81) <= 0.01 };
+    },
+  },
+  baton: {
+    name: 'Thrown spinning baton', topic: T_KIN,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1, y: 0 }, { x: 5.5, y: 0 }], side: 1 });
+      const vx = 2.5, vy = 6, w = 9;
+      ctx.rod = add('rod', { ...rodGeom({ x: -0.5, y: 0.8 }, { x: 0.5, y: 0.8 }), mass: 0.4, width: 5, vx, vy, omega: w, label: '' });
+      ctx.ends = [-0.5, 0.5].map((dx) => {
+        const pm = add('pointmass', { x: dx, y: 0.8, mass: 0.3, size: 8, vx, vy: vy + w * dx, collide: false, label: '' });   // v = v_cm + ω × r
+        add('weld', { p: R(pm, 'c') });
+        return pm;
+      });
+      ctx.main = ctx.rod;
+    },
+    frame: { x0: -1, y0: 0, x1: 5.5, y1: 3.2 },
+    show: { trails: true, com: true }, trailSec: 1.4, graphs: (c) => [{ kind: 'pos', body: c.rod.id }, { kind: 'omega', body: c.rod.id }],
+    notes: ['A baton (0.4 kg rod with 0.3 kg weights on the ends) is thrown at (2.5, 6) m/s spinning at 9 rad/s.',
+      'The ends trace loops, but the center of mass follows the same parabola as a thrown ball: x = v₀ₓt, y = y₀ + v₀ᵧt − ½gt². Gravity acts as if all the weight were at the center of mass.',
+      'Gravity gives no torque about the center of mass, so the spin stays exactly 9 rad/s until it lands.'],
+    check(sc, c) {
+      let com, w;
+      simulate(sc, 0.9, (s) => { com = s.momentum().com; w = recOf(s, c.rod).getAngularVelocity(); });
+      const t = 0.9, wx = 2.5 * t, wy = 0.8 + 6 * t - 4.905 * t * t, err = Math.hypot(com.x - wx, com.y - wy);
+      return { meas: `center of mass off the parabola by ${(1000 * err).toFixed(2)} mm, ω = ${w.toFixed(4)} rad/s`, exp: '< 2 mm, 9 rad/s ±0.5%', pass: err < 0.002 && relErr(w, 9) <= 0.005 };
+    },
+  },
+  terminal: {
+    name: 'Falling with air drag: terminal velocity', topic: T_KIN,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -4, y: 0 }, { x: 4, y: 0 }], side: 1 });
+      const ball = (x, props, tex) => { add('text', { p: free(x, 8.6), label: tex }); return add('disk', { x, y: 8, r: 0.1, mass: 0.5, collideBodies: false, label: '', centerPin: false, ...props }); };
+      ctx.free = ball(-3, { fill: 'white' }, '\\text{no drag}');
+      ctx.lin = ball(0, { drag: 'linear', dragB: 0.5 }, 'F = -bv');
+      ctx.quad = ball(3, { drag: 'quadratic', dragC: 0.05 }, 'F = -cv^2');
+      ctx.main = ctx.lin;
+    },
+    show: { graphs: true, vel: true }, graphs: (c) => [{ kind: 'vel', body: c.free.id }, { kind: 'vel', body: c.lin.id }, { kind: 'vel', body: c.quad.id }],
+    notes: ['Three 0.5 kg balls dropped from 8 m: no drag, linear drag F = −bv (b = 0.5 N·s/m), and quadratic drag F = −cv² (c = 0.05 N·s²/m²).',
+      'Linear: m dv/dt = mg − bv gives v = v_t(1 − e^(−t/τ)) with v_t = mg/b = 9.81 m/s and τ = m/b = 1 s. At t = τ it\'s at 63%: 6.20 m/s.',
+      'Quadratic: v_t = √(mg/c) = 9.90 m/s and v = v_t tanh(gt/v_t) = 7.50 m/s at t = 1 s. The no-drag ball is at gt = 9.81 m/s.',
+      'Try: the velocity graphs level off at v_t, where drag balances weight (ΣF = 0, constant speed).'],
+    check(sc, c) {
+      let va, vb, vf;
+      simulate(sc, 1, (s) => { va = -recOf(s, c.lin).getLinearVelocity().y; vb = -recOf(s, c.quad).getLinearVelocity().y; vf = -recOf(s, c.free).getLinearVelocity().y; });
+      const wa = 9.81 * (1 - Math.exp(-1)), vt = Math.sqrt(0.5 * 9.81 / 0.05), wb = vt * Math.tanh(9.81 / vt);
+      return { meas: `v(1 s) = ${vf.toFixed(3)}, ${va.toFixed(3)}, ${vb.toFixed(3)} m/s`, exp: `9.810, ${wa.toFixed(3)}, ${wb.toFixed(3)} (±1%)`, pass: relErr(vf, 9.81) <= 0.005 && relErr(va, wa) <= 0.01 && relErr(vb, wb) <= 0.01 };
+    },
+  },
+  hemisphere: {
+    name: 'Sliding off a frictionless dome', topic: T_EN,
+    build(add, R, sc, ctx) {
+      const pts = [];
+      for (let a = 180; a >= 0; a -= 5) pts.push({ x: Math.cos(toRad(a)), y: Math.sin(toRad(a)) });
+      ctx.dome = add('surface', { kind: 'arc', pts, side: 1, mu_s: 0, mu_k: 0 });
+      add('surface', { kind: 'line', pts: [{ x: -2.6, y: 0 }, { x: 2.6, y: 0 }], side: 1 });
+      ctx.main = add('disk', { x: 0, y: 1.08, r: 0.08, mass: 0.2, mu_s: 0, mu_k: 0, vx: 0.3, label: 'm', labelDy: 0.22, centerPin: false });
+      add('dim', { a: free(0, 0), b: free(-Math.cos(toRad(30)), Math.sin(toRad(30))), off: 0, label: 'R' });
+      const s = Math.sin(toRad(47.97)), cphi = Math.cos(toRad(47.97));
+      add('line', { a: free(0, 0), b: free(1.35 * s, 1.35 * cphi), dash: 'dashed' });
+      add('angle', { v: free(0, 0), r: free(0, 1.3), t: free(s, cphi), rad: 0.5, arrows: 'end', showRef: true, label: '\\phi' });
+    },
+    show: { trails: true, fbd: true, graphs: true }, trailSec: 2, graphs: (c) => [{ kind: 'force', body: c.main.id, force: 'cn:b:' + c.dome.id, comp: 'm' }, { kind: 'energy' }],
+    notes: ['A small frictionless puck is nudged off the top of a dome (R = 1 m; its center moves on ρ = R + r = 1.08 m) at 0.3 m/s.',
+      'On the dome: m g cos φ − N = m v²/ρ, and energy gives v² = v₀² + 2gρ(1 − cos φ). It leaves when N reaches 0: cos φ = (2 + v₀²/gρ)/3. From rest that\'s the famous cos φ = ⅔ (48.2°, two-thirds of the way up); with this small push, 47.97° (dashed line).',
+      'The force graph shows N falling smoothly to zero. After that the puck is a projectile and lands well clear of the dome.'],
+    check(sc, c) {
+      const Ns = [], phis = [];
+      simulate(sc, 1.6, (s) => { const r = s.recs.get(c.main.id), e = r.ledger.get('cn:b:' + c.dome.id), p = r.body.getWorldCenter(); Ns.push(e && e.active ? Math.hypot(e.F.x, e.F.y) : 0); phis.push(toDeg(Math.atan2(p.x, p.y))); });
+      // The contact force jitters a little from facet to facet of the curved track, so look at 8-step averages.
+      const mg = 0.2 * 9.81;
+      let i = Ns.findIndex((N) => N > 0.5 * mg);
+      for (; i >= 0 && i < Ns.length - 8; i++) if (Ns.slice(i, i + 8).reduce((a, b) => a + b, 0) / 8 <= 0.01 * mg) break;
+      const phi = phis[i], want = toDeg(Math.acos((2 + 0.09 / (9.81 * 1.08)) / 3));
+      return { meas: `leaves the dome at φ = ${(+phi).toFixed(2)}°`, exp: `${want.toFixed(2)}° ±1°`, pass: Math.abs(phi - want) <= 1 };
+    },
+  },
+  vertCircle: {
+    name: 'Ball on a string in a vertical circle', topic: T_EN,
+    build(add, R, sc, ctx) {
+      add('pin', { p: free(0, 1.5), mount: 'ground', mountAngle: 90, mountLen: 24 });
+      ctx.main = add('pointmass', { x: 0, y: 0.5, mass: 0.5, size: 9, style: 'bob', vx: +(1.15 * Math.sqrt(5 * 9.81)).toFixed(4), label: 'm', labelDy: -0.2 });
+      add('rope', { a: free(0, 1.5), b: R(ctx.main, 'c') });
+      add('dim', { a: free(0, 1.5), b: free(1, 1.5), off: 0.3, label: 'L' });
+      add('line', { a: free(-1, 1.5), b: free(1, 1.5), dash: 'dashed' });
+    },
+    frame: { x0: -1.25, y0: 0.3, x1: 1.25, y1: 2.7 },
+    show: { fbd: true, graphs: true, vel: true, trails: true }, trailSec: 1, graphs: (c) => [{ kind: 'force', body: c.main.id, force: 'rp:0', comp: 'm' }, { kind: 'energy' }],
+    notes: ['A 0.5 kg ball whirled in a vertical circle on a 1 m string, starting at the bottom at 8.05 m/s (1.15 × the minimum √(5gL) = 7.00 m/s).',
+      'The string can only pull, so at the top it needs v_top² ≥ gL. Energy: v_top² = v_bottom² − 4gL. Here v_top = 5.06 m/s > √(gL) = 3.13 m/s: the string stays tight.',
+      'Tension: T_bottom = m(g + v_b²/L) = 37.3 N, T_top = m(v_t²/L − g) = 7.9 N. The difference is always 6mg = 29.4 N, whatever the speed (as long as it makes it round).',
+      'Try: lower the starting speed below 7.00 m/s. The string goes slack before the top and the ball falls inside the circle.'],
+    check(sc, c) {
+      let hi = 0, lo = Infinity;
+      simulate(sc, 1.2, (s) => { const T = ledgerF(s, c.main, 'rp:'); hi = Math.max(hi, T); lo = Math.min(lo, T); });
+      const m = 0.5, v2 = c.main.vx ** 2, wb = m * (9.81 + v2), wt = m * (v2 - 4 * 9.81 - 9.81);
+      return { meas: `T from ${lo.toFixed(2)} to ${hi.toFixed(2)} N (difference ${(hi - lo).toFixed(2)} N)`, exp: `${wt.toFixed(2)} to ${wb.toFixed(2)} N, 6mg = ${(6 * m * 9.81).toFixed(2)} N (±2%)`, pass: relErr(hi - lo, 6 * m * 9.81) <= 0.02 && relErr(hi, wb) <= 0.02 };
+    },
+  },
+  springLaunch: {
+    name: 'Spring launcher and a ramp', topic: T_EN,
+    build(add, R, sc, ctx) {
+      add('surface', { kind: 'line', pts: [{ x: -1, y: -0.1 }, { x: -1, y: 0.8 }], side: -1 });
+      add('surface', { kind: 'line', pts: [{ x: -1, y: 0 }, { x: 2, y: 0 }], side: 1, mu_s: 0, mu_k: 0 });
+      const pts = [];
+      for (let a = 270; a <= 360; a += 5) pts.push({ x: 2 + 2 * Math.cos(toRad(a)), y: 2 + 2 * Math.sin(toRad(a)) });
+      add('surface', { kind: 'arc', pts, side: 1, mu_s: 0, mu_k: 0 });
+      // Light plunger on a spring (rest: its left face at x = -0.2), pushed back 0.3 m; the ball rests against it.
+      const pl = add('block', { x: -0.45, y: 0.15, w: 0.1, h: 0.3, mass: 0.1, mu_s: 0, mu_k: 0, label: '' });
+      add('spring', { a: free(-1, 0.15), b: R(pl, 'l'), k: 200, restLen: 0.8, coils: 8, label: 'k' });
+      ctx.main = add('disk', { x: -0.25, y: 0.15, r: 0.15, mass: 1, mu_s: 0, mu_k: 0, label: 'm', labelDy: 0.3, centerPin: false });
+      const hw = 0.15 + 200 * 0.09 / (2 * 9.81 * 1.1);
+      add('line', { a: free(2.2, hw), b: free(4.3, hw), dash: 'dashed' });
+      add('text', { p: free(4.0, hw + 0.2), label: 'h' });
+    },
+    show: { graphs: true, vel: true }, graphs: (c) => [{ kind: 'energy' }, { kind: 'vel', body: c.main.id }],
+    notes: ['A k = 200 N/m spring is pushed in x = 0.3 m behind a light 0.1 kg plunger, with a 1 kg puck resting against it. Everything is frictionless.',
+      'The spring pushes both until it reaches its natural length; then the plunger starts slowing down and the puck leaves. Energy: ½kx² = ½(m + m_p)v², so v = 4.05 m/s and the puck carries ½mv² = 8.18 J of the spring\'s 9 J (the plunger keeps the rest).',
+      'Up the ramp: ½mv² = mgh, so it rises h = kx²/(2g(m + m_p)) = 0.834 m (dashed line) before sliding back. The shape of the ramp doesn\'t matter, only the height.'],
+    check(sc, c) {
+      let ymax = -Infinity;
+      simulate(sc, 2, (s) => { ymax = Math.max(ymax, recOf(s, c.main).getWorldCenter().y); });
+      const h = ymax - 0.15, want = 200 * 0.09 / (2 * 9.81 * 1.1);
+      return { meas: `rises ${h.toFixed(4)} m`, exp: `${want.toFixed(4)} m ±1.5%`, pass: relErr(h, want) <= 0.015 };
+    },
+  },
+  spinBeads: {
+    name: 'Beads sliding out on a spinning rod', topic: T_ROT,
+    build(add, R, sc, ctx) {
+      sc.settings.g = 0;
+      ctx.main = add('rod', { ...rodGeom({ x: -1, y: 0 }, { x: 1, y: 0 }), mass: 1, width: 5, omega: 4, label: '' });
+      add('pin', { p: R(ctx.main, 'm') });
+      add('track', { a: R(ctx.main, 'a'), b: R(ctx.main, 'b'), host: ctx.main.id, width: 10 });
+      ctx.beads = [-0.2, 0.2].map((x) => add('pointmass', { x, y: 0, mass: 0.25, size: 8, vy: 4 * x, collide: false, label: '' }));
+    },
+    O: { x: 0, y: 0 },
+    frame: { x0: -1.2, y0: -1.2, x1: 1.2, y1: 1.2 },
+    show: { graphs: true, omega: true, trails: true }, trailSec: 3, graphs: (c) => [{ kind: 'omega', body: c.main.id }, { kind: 'ang' }],
+    notes: ['Gravity off. A 1 kg, 2 m rod spins at 4 rad/s about its center with two 0.25 kg beads 0.2 m out, free to slide along it (a track rides on the rod). Point O is the pivot.',
+      'Nothing holds the beads in, so they slide outward to the ends. The pin can push but gives no torque about O, so angular momentum about O is conserved: I₀ω₀ = I₁ω₁.',
+      'Textbook: I₀ = ML²/12 + 2m(0.2)² = 0.353 kg·m², I₁ = ML²/12 + 2m(1)² = 0.833 kg·m², so ω₁ = ω₀ I₀/I₁ = 1.70 rad/s. Like a skater putting their arms out.',
+      'Kinetic energy is not conserved: it drops from 2.83 J to 1.20 J, mostly when the beads slam into the stops at the ends.'],
+    check(sc, c) {
+      let L0 = null, L1, w1;
+      simulate(sc, 4, (s) => { const L = s.momentum({ x: 0, y: 0 }).L; if (L0 === null) L0 = L; L1 = L; w1 = recOf(s, c.main).getAngularVelocity(); });
+      const I0 = 4 / 12 + 2 * 0.25 * 0.04, I1 = 4 / 12 + 2 * 0.25 * 1, want = 4 * I0 / I1;
+      return { meas: `L: ${L0.toFixed(4)} → ${L1.toFixed(4)} kg·m²/s, ω = ${w1.toFixed(4)} rad/s`, exp: `L conserved (±0.5%), ω = ${want.toFixed(4)} (±1%)`, pass: relErr(L1, L0) <= 0.005 && relErr(w1, want) <= 0.01 };
+    },
+  },
+  ellipse: {
+    name: 'Elliptical orbit (Kepler\'s laws)', topic: T_GRAV,
+    build(add, R, sc, ctx) {
+      sc.settings.gMode = 'universal'; sc.settings.G = 1;
+      add('disk', { x: 0, y: 0, r: 0.35, mass: 1000, fixed: true, label: 'M', labelDx: 0.5, labelDy: 0.35, centerPin: false });
+      ctx.main = add('disk', { x: 5, y: 0, r: 0.1, mass: 1, vy: 12, label: 'm', labelDx: 0.3, centerPin: false });
+      add('dim', { a: free(0, 0), b: free(5, 0), off: -0.4, label: 'r_a' });
+    },
+    frame: { x0: -3.2, y0: -4, x1: 5.4, y1: 4 },
+    show: { trails: true, vel: true, graphs: true }, trailSec: 1.6, graphs: (c) => [{ kind: 'pos', body: c.main.id }, { kind: 'ang' }],
+    notes: ['G = 1 (sandbox units). A planet at r = 5 m from a fixed 1000 kg sun moves at 12 m/s, slower than the circular 14.14 m/s, so it falls inward on an ellipse.',
+      'Energy fixes the size: E = ½mv² − GMm/r = −128 J = −GMm/2a, so a = 3.906 m and the closest approach is r_p = 2a − r_a = 2.81 m.',
+      'Kepler 3: T = 2π√(a³/GM) = 1.534 s. Kepler 2 (equal areas) is angular momentum conservation: the speed at r_p is 12 × 5/2.81 = 21.3 m/s. The angular momentum graph stays flat.'],
+    check(sc, c) {
+      const ts = [], vs = [];
+      let rmin = Infinity;
+      simulate(sc, 3.2, (s) => { const b = recOf(s, c.main), p = b.getWorldCenter(); ts.push(s.t); vs.push(b.getLinearVelocity().x); rmin = Math.min(rmin, Math.hypot(p.x, p.y)); });
+      const a = 1 / (2 / 5 - 144 / 1000), T = periodFromCrossings(ts, vs), wT = TAU * Math.sqrt(a ** 3 / 1000);
+      return { meas: `T = ${T.toFixed(4)} s, r_p = ${rmin.toFixed(4)} m`, exp: `${wT.toFixed(4)} s, ${(2 * a - 5).toFixed(4)} m (±1%)`, pass: relErr(T, wT) <= 0.01 && relErr(rmin, 2 * a - 5) <= 0.01 };
+    },
+  },
+  binary: {
+    name: 'Binary stars', topic: T_GRAV,
+    build(add, R, sc, ctx) {
+      sc.settings.gMode = 'universal'; sc.settings.G = 1;
+      const w = Math.sqrt(900 / 216);
+      ctx.a = add('disk', { x: -2, y: 0, r: 0.3, mass: 600, vy: -2 * w, label: 'M_1', labelDx: -0.55, centerPin: false });
+      ctx.b = add('disk', { x: 4, y: 0, r: 0.22, mass: 300, vy: 4 * w, label: 'M_2', labelDx: 0.5, centerPin: false, fill: 'white' });
+      add('dim', { a: free(-2, 0), b: free(4, 0), off: -0.6, label: 'd' });
+      ctx.main = ctx.b;
+    },
+    frame: { x0: -4.5, y0: -4.5, x1: 4.5, y1: 4.5 },
+    show: { trails: true, com: true, graphs: true }, trailSec: 3.1, graphs: (c) => [{ kind: 'mom' }, { kind: 'energy' }],
+    notes: ['G = 1. Two stars, 600 kg and 300 kg, 6 m apart, both moving. They circle their common center of mass (the marker), which never moves.',
+      'Each star\'s distance from the center of mass goes inversely with its mass: r₁ = 2 m, r₂ = 4 m. Both share the same ω: ω² = G(M₁ + M₂)/d³, so T = 2π√(d³/G(M₁ + M₂)) = 3.078 s.',
+      'Momentum: 600 × 4.08 = 300 × 8.16, so the total is 0 and stays 0.'],
+    check(sc, c) {
+      const ts = [], vs = [];
+      let c0 = null, drift = 0;
+      simulate(sc, 5, (s) => { ts.push(s.t); vs.push(recOf(s, c.b).getLinearVelocity().x); const m = s.momentum().com; if (!c0) c0 = m; drift = Math.max(drift, V.dist(m, c0)); });
+      const T = periodFromCrossings(ts, vs), w = TAU * Math.sqrt(216 / 900);
+      return { meas: `T = ${T.toFixed(4)} s, center of mass drifts ${(1000 * drift).toFixed(2)} mm`, exp: `${w.toFixed(4)} s ±1%, < 5 mm`, pass: relErr(T, w) <= 0.01 && drift < 0.005 };
+    },
   },
 };
 
@@ -2187,6 +2943,9 @@ const SKIN = 2 * SLOP;
 const ARC_STEP = toRad(0.1);     // physics resolution for curved surfaces
 const CURVE_TARGET = 0.002;      // max turn of a body's velocity per substep on a curved surface (rad)
 const ROT_TARGET = 0.001;        // max rotation per substep of a body pivoting on a joint (rad)
+const SWING_TARGET = 0.0004;     // the same for a bob swinging on a massless rod or a straight rope
+const BEND_TARGET = 0.002;       // max ω·h of a flexible rod's lowest bending mode (numerical damping ≈ ω·h/2)
+const BEND_STAB = 2;             // max w·h of a single bend joint (the solver diverges past ~4)
 // Rebuild a sampled arc finely: fit the circle through its first, middle and last points, then step along it.
 function densifyArc(pts, step) {
   const a = pts[0], m = pts[pts.length >> 1], b = pts[pts.length - 1];
@@ -2261,9 +3020,52 @@ function refBodyId(pt) {
 }
 const v2 = (p) => new planck.Vec2(p.x, p.y);
 
+/* ---- Flexible rods (bending stiffness EI) ----
+   When the simulation starts, a rod with EI > 0 is split into short rigid pieces joined by angular springs:
+   n bend points at the middles of n equal lengths l = L/n (so the two end pieces are l/2 long), each with
+   stiffness K = EI/l. That's the midpoint rule for the beam's curvature: a cantilever's tip deflection comes
+   out PL³/3EI·(1 − 1/4n²), 0.25% short at n = 10. While it runs the pieces are ordinary rods in the scene
+   (Reset brings back the single rod). The end-b piece keeps the rod's id, so its graphs follow that end, and
+   anything attached to the rod moves to the piece under it. Returns the bend points and the rods. */
+function expandFlexRods() {
+  const out = { hinges: [], rods: [] };
+  for (const o of scene.objects.filter((q) => q.type === 'rod' && +q.EI > 0 && q.mass > 0 && !q.fixed)) {
+    const n = Math.max(2, Math.min(40, Math.round(+o.pieces || 10))), L = o.len, l = L / n, w = +o.omega || 0;
+    const cuts = [-L / 2];
+    for (let j = 0; j < n; j++) cuts.push(-L / 2 + (j + 0.5) * l);
+    cuts.push(L / 2);
+    const last = n, mid = cuts.findIndex((c, i) => i < last && cuts[i + 1] > 0);   // the piece holding the center gets the label
+    const pieces = cuts.slice(0, -1).map((s0, i) => {
+      const s1 = cuts[i + 1], sc = (s0 + s1) / 2, c = L2W(o, sc, 0), r = V.sub(c, o);
+      return { ...o, id: i === last ? o.id : `${o.id}~${i}`, x: c.x, y: c.y, len: s1 - s0, mass: o.mass * (s1 - s0) / L, Iover: '', EI: 0,
+        label: i === mid ? o.label : '', labelDx: o.labelDx - r.x, labelDy: o.labelDy - r.y,
+        vx: (+o.vx || 0) - w * r.y, vy: (+o.vy || 0) + w * r.x, flexOf: o.id, _s: sc };   // v = v0 + ω × r
+    });
+    const piece = (s) => { let i = 0; while (i < last && s > cuts[i + 1]) i++; return pieces[i]; };
+    const remap = (pt) => {
+      if (!pt || pt.ref !== o.id) return pt;
+      if (pt.a === 'a') return { ...pt, ref: pieces[0].id };
+      if (pt.a === 'b') return pt;                                      // the last piece has the rod's id
+      const q = W2L(o, P(pt)), pc = piece(q.x);
+      return { ref: pc.id, a: '@', lx: q.x - pc._s, ly: q.y, x: pt.x, y: pt.y };
+    };
+    for (const q of scene.objects) {
+      if (q === o) continue;
+      if (q.host === o.id) { const at = q.p || q.a; q.host = piece(W2L(o, P(at)).x).id; }
+      for (const k of META[q.type].pts || []) q[k] = remap(q[k]);
+    }
+    for (let j = 0; j < n; j++) out.hinges.push({ a: pieces[j].id, b: pieces[j + 1].id, p: L2W(o, cuts[j + 1], 0), K: o.EI / l, rod: o.id });
+    out.rods.push({ id: o.id, EI: +o.EI, m: +o.mass, L });
+    scene.objects.splice(scene.objects.indexOf(o), 1, ...pieces);
+  }
+  return out;
+}
+
 class Sim {
   constructor() {
     if (!window.planck) throw new Error('Planck.js did not load (it needs internet the first time).');
+    this.flex = expandFlexRods();               // flexible rods become pieces + bend joints (before anything reads the scene)
+    this.bendWork = 0;                          // work done by the bend joints (their elastic energy is in U_s)
     const st = scene.settings;
     this.dt = st.dt; this.t = 0; this.tMid = 0; this.steps = 0; this.subNow = 1;
     this.velIters = st.velIters; this.posIters = st.posIters;
@@ -2292,6 +3094,7 @@ class Sim {
     this.buildBodies();
     this.glueFreePoints();
     this.buildJoints();
+    this.buildBends();
     this.buildElements();
     this.buildLoads();
     this.buildRopes();
@@ -2555,8 +3358,28 @@ class Sim {
       const j = o.rotate
         ? new planck.WheelJoint({ frequencyHz: 0, dampingRatio: 0 }, A, r.body, c, v2(u))
         : new planck.PrismaticJoint({ enableLimit: true, lowerTranslation: -s, upperTranslation: L - s }, A, r.body, c, v2(u));
+      // Planck 1.5.0 bug: with no spring (frequencyHz 0) the wheel joint never sets these two lever arms,
+      // and multiplying by undefined turns every body in the island into NaN on the first step.
+      if (o.rotate) { j.m_sAx = 0; j.m_sBx = 0; }
       this.addJoint(j, 'track', 'N_t', `Track force (${o.id})`, true);
       this.link(A, r.body, { type: 'track', axis: u });
+    }
+  }
+
+  // Bend points of flexible rods: soft welds. The position stays joined; the angle is a spring of stiffness K.
+  // Box2D sets a soft joint's stiffness as k = m_eff·ω² with m_eff = 1/(1/I_A + 1/I_B), so ω = √(K/m_eff).
+  // It's solved implicitly, which damps a vibration of frequency ω by about ζ = ω·h/2 (chooseSubsteps keeps that
+  // small for the rod's lowest mode). Each joint's own frequency w also needs w·h ≤ ~3: past that, Box2D's
+  // iterative solver stops converging along the chain (a light rod holding a heavy mass came out 2.8x too stiff).
+  buildBends() {
+    for (const h of this.flex.hinges) {
+      const A = this.recs.get(h.a), B = this.recs.get(h.b);
+      if (!A || !B) continue;
+      const w = Math.sqrt(h.K * (A.body.m_invI + B.body.m_invI));
+      this.flex.wJoint = Math.max(this.flex.wJoint || 0, w);
+      h.j = this.addJoint(new planck.WeldJoint({ frequencyHz: w / TAU, dampingRatio: 0 }, A.body, B.body, v2(h.p)), 'bend', 'M_b', `Bending (rod ${h.rod})`);
+      h.A = A.body; h.B = B.body; h.rel0 = B.body.getAngle() - A.body.getAngle();
+      this.link(A.body, B.body, { type: 'weld', anchor: h.p });
     }
   }
 
@@ -2689,6 +3512,27 @@ class Sim {
     const consider = (b, r) => { if (b.isDynamic() && (!r || Math.hypot(r.x, r.y) > 1e-3)) w = Math.max(w, Math.abs(b.getAngularVelocity())); };
     for (const jr of this.joints) { const j = jr.j; consider(j.getBodyA(), jr.useB ? null : j.m_rA); consider(j.getBodyB(), jr.useB ? null : j.m_rB); }
     for (const seg of this.ropes) for (const nd of seg.nodes) if (nd.kind === 'end') consider(nd.body, nd.local);
+    // A bob on a massless rod or a straight rope swings about the far end without spinning itself, so
+    // also count how fast each such line turns: |Δv × d| / |d|². (A ball whirled on a string at 8 rad/s
+    // lost 9% of its energy in half a turn before this.)
+    // These lines get a tighter target (SWING_TARGET): a pendulum released from 160° is so sensitive to
+    // its amplitude that losing 1% of mgL shortens its period by 3%.
+    const swing = (bA, pA, bB, pB) => {
+      if (!bA.isDynamic() && !bB.isDynamic()) return;
+      const d = V.sub(pB, pA), d2 = V.dot(d, d);
+      if (d2 < 1e-6) return;
+      const dv = V.sub(bB.getLinearVelocityFromWorldPoint(pB), bA.getLinearVelocityFromWorldPoint(pA));
+      w = Math.max(w, Math.abs(V.cross(d, dv)) / d2 * ROT_TARGET / SWING_TARGET);
+    };
+    for (const jr of this.joints) if (jr.kind === 'rod') swing(jr.j.getBodyA(), jr.j.getAnchorA(), jr.j.getBodyB(), jr.j.getAnchorB());
+    for (const seg of this.ropes) if (seg.nodes.length === 2 && seg.nodes.every((nd) => nd.kind === 'end')) { const [a, b] = seg.nodes; swing(a.body, a.body.getWorldPoint(a.local), b.body, b.body.getWorldPoint(b.local)); }
+    // Same for a turning block or rod resting on something: its touching corner moves on an arc, so each step
+    // it ends up a hair off the surface and the contact flickers (a ladder sliding down a wall lost the wall
+    // at 53° instead of 39°). Circles are exempt: a rolling wheel's contact point doesn't move round it.
+    for (let c = this.world.getContactList(); c; c = c.getNext()) {
+      if (!c.isTouching()) continue;
+      for (const f of [c.getFixtureA(), c.getFixtureB()]) if (f.getShape().getType() === 'polygon') consider(f.getBody(), null);
+    }
     return w;
   }
 
@@ -2762,6 +3606,21 @@ class Sim {
       rate = Math.max(rate, Math.sqrt(this.G * (a.m + b.m) / d ** 3));
     }
     let need = Math.ceil(rate * this.dt / OMEGA_DT_TARGET);
+    // Flexible rods: keep the lowest bending mode at ω·h ≤ BEND_TARGET, so the soft joints' numerical damping
+    // stays near ζ = 0.1%. Estimate: a cantilever carrying everything joined to it at its tip,
+    // ω² = (3EI/L³) / (0.243 m + M_attached) (that's 3.52²·EI/mL³ with nothing attached).
+    for (const fr of this.flex.rods) {
+      const mine = new Set([...this.recs.values()].filter((r) => r.o.flexOf === fr.id).map((r) => r.body)), att = new Set();
+      for (const b of mine) for (const l of this.byBody.get(b).links) if (!mine.has(l.other) && l.other.isDynamic()) att.add(l.other);
+      const M = [...att].reduce((sum, b) => sum + (this.byBody.get(b) ? this.byBody.get(b).m : 0), 0);
+      const nBend = Math.ceil(Math.sqrt(3 * fr.EI / fr.L ** 3 / (0.243 * fr.m + M)) * this.dt / BEND_TARGET);
+      if (nBend > need) { need = nBend; this.flexNote = true; }
+    }
+    if (this.flex.wJoint && Math.ceil(this.flex.wJoint * this.dt / BEND_STAB) > need) { need = Math.ceil(this.flex.wJoint * this.dt / BEND_STAB); this.flexNote = true; }
+    if (this.flexNote) {
+      this.notes.push(`flexible rod: ${Math.min(need, MAX_SUBSTEPS)} substeps`);
+      if (need > MAX_SUBSTEPS) this.warn('A flexible rod is too stiff for its mass to simulate well: lower EI, use fewer bend points, or make it rigid (EI = 0).');
+    }
     // Fast motion along a curved surface: each substep the contact strips off the bit of velocity that turns
     // into the track (a tiny inelastic bump), losing about (v h / rho)^2 of the kinetic energy. Over an arc of
     // angle Theta that's Theta * v h / rho in total, so keep v h / rho <= CURVE_TARGET (about 1% per full loop).
@@ -2974,6 +3833,7 @@ class Sim {
       else if (it.kind === 'damper') this.Eloss.damper -= W;
       else if (it.kind === 'drag') this.Eloss.drag -= W;
       else if (it.kind === 'tension' || it.kind === 'pin' || it.kind === 'weld' || it.kind === 'rod' || it.kind === 'track') this.Eloss.joint -= W;
+      else if (it.kind === 'bend') this.bendWork += W;
       else if (it.kind === 'applied' || it.kind === 'moment' || it.kind === 'actuator') this.Win += W;
     }
     this.subQ.length = 0;
@@ -3066,11 +3926,16 @@ class Sim {
       Us += o.nonlinear ? 0.5 * o.k2 * d * d + 0.25 * o.k3 * d ** 4 : 0.5 * o.k * d * d;
     }
     for (const ts of this.torsions) { const d = ts.B.getAngle() - ts.A.getAngle() - ts.rel0; Us += 0.5 * ts.k * d * d; }
+    // Flexible rods: elastic energy of bending, and the little the soft joints lose (work out minus what's stored).
+    let Ub = 0;
+    for (const h of this.flex.hinges) if (h.j) { const d = h.B.getAngle() - h.A.getAngle() - h.rel0; Ub += 0.5 * h.K * d * d; }
+    Us += Ub;
+    const bendLoss = -this.bendWork - Ub;
     // Energy that left as heat (friction, impacts, dampers, rope jerks) and work put in by applied loads.
     // total = K + U + E_th - W_in should stay constant: that's the "energy adds up" check.
-    const Eth = this.Eloss.contact + this.Eloss.damper + this.Eloss.joint + this.Eloss.drag;
+    const Eth = this.Eloss.contact + this.Eloss.damper + this.Eloss.joint + this.Eloss.drag + bendLoss;
     const mech = K + Kr + Ug + Us;
-    return { K, Kr, Ug, Us, Eth, Win: this.Win, mech, total: mech + Eth - this.Win };
+    return { K, Kr, Ug, Us, Eth, Win: this.Win, mech, total: mech + Eth - this.Win, bendLoss };
   }
   // System momentum and angular momentum about point O.
   momentum(O = ana.O) {
@@ -3651,6 +4516,49 @@ TESTS.push({ name: 'Frictionless ball around the vertical loop: energy kept', ru
   simulate(sc, 2, (s) => { const E = s.energy(); if (E0 === undefined) E0 = E.mech; worst = Math.max(worst, Math.abs(E.mech - E0) / Math.abs(E0)); });
   return { meas: `worst |ΔE|/E = ${(100 * worst).toFixed(2)}% over the ramp and one loop`, exp: '< 2% (was ~50% with 5° track pieces at one substep)', pass: worst < 0.02 };
 } });
+// Flexible rods (bending stiffness EI): beam theory, energy, and that Reset brings the single rod back.
+TESTS.push({ group: 'Flexible rods', name: 'Cantilever sagging under its own weight (wL⁴/8EI)', run() {
+  const sc = testScene((add, R) => { const r = add('rod', { ...rodGeom({ x: 0, y: 0 }, { x: 2, y: 0 }), mass: 4, EI: 1000, pieces: 10, width: 4 }); add('weld', { p: R(r, 'a') }); });
+  const id = sc.objects[0].id, ys = [], vs = [];
+  const sim = simulate(sc, 3.2, (s) => { const b = s.recs.get(id).body, tip = b.getWorldPoint(new planck.Vec2(s.recs.get(id).o.len / 2, 0)); ys.push(-tip.y); vs.push(b.getLinearVelocity().y); });
+  const cr = [];
+  for (let i = 1; i < vs.length; i++) if ((vs[i - 1] < 0) !== (vs[i] < 0)) cr.push(i);
+  const a = cr[0], b = cr[cr.length - 1 - ((cr.length - 1) % 2)], sag = ys.slice(a, b).reduce((s, y) => s + y, 0) / (b - a);
+  const want = (4 * 9.81 / 2) * 16 / (8 * 1000), loss = sim.energy().bendLoss;
+  return { meas: `mean tip sag ${(1000 * sag).toFixed(2)} mm; bend joints lost ${loss.toFixed(4)} J`, exp: `${(1000 * want).toFixed(2)} mm ±1.5%; loss ≥ 0 (they never create energy)`, pass: relErr(sag, want) <= 0.015 && loss >= 0 };
+} });
+TESTS.push({ name: 'Light cantilever with a heavy tip mass: f = √(3EI/L³ / M)', run() {
+  const sc = testScene((add, R) => {
+    const r = add('rod', { ...rodGeom({ x: 0, y: 0 }, { x: 1, y: 0 }), mass: 0.1, EI: 50, pieces: 10, width: 4 });
+    add('weld', { p: R(r, 'a') });
+    const tip = add('pointmass', { x: 1, y: 0, mass: 5, vy: 0.1, collide: false });
+    add('weld', { p: R(tip, 'c') });
+  }, 0);
+  const tip = sc.objects[2], ts = [], vs = [];
+  simulate(sc, 3, (s) => { ts.push(s.t); vs.push(recOf(s, tip).getLinearVelocity().y); });
+  const T = periodFromCrossings(ts, vs), want = TAU * Math.sqrt((5 + 0.243 * 0.1) / 150);
+  return { meas: `T = ${T.toFixed(4)} s`, exp: `${want.toFixed(4)} s ±1% (a 650:1 mass ratio across the bend joints)`, pass: relErr(T, want) <= 0.01 };
+} });
+TESTS.push({ name: 'Play splits a flexible rod into pieces; Reset restores it exactly', run() {
+  const saved = { scene, snap: run.snapshot, sim: run.sim, rec: run.rec };
+  try {
+    run.sim = null; run.snapshot = null;
+    scene = testScene((add, R) => {
+      const r = add('rod', { ...rodGeom({ x: 0, y: 1 }, { x: 2, y: 1 }), mass: 2, EI: 500, width: 5 });
+      add('pin', { p: R(r, 'a'), mount: 'ground' });
+      add('spring', { a: R(r, 'm'), b: free(1, 2.2), k: 200, restLen: 1.2 });
+      add('force', { p: R(r, 'b'), angle: -90, law: '10' });
+    });
+    const before = JSON.stringify(scene.objects), n0 = scene.objects.length;
+    if (!startSim()) return { meas: 'could not start', exp: '', pass: false };
+    const n1 = scene.objects.length;
+    for (let i = 0; i < 120; i++) run.sim.step();
+    run.sim.sync();
+    scene = JSON.parse(run.snapshot); run.sim = null;
+    const same = JSON.stringify(scene.objects) === before;
+    return { meas: `${n0} objects → ${n1} while running → ${scene.objects.length} after Reset (${same ? 'identical' : 'changed'})`, exp: '11 pieces (10 bend points) + 3 others while running; identical after Reset', pass: n1 === n0 - 1 + 11 && same };
+  } finally { scene = saved.scene; run.snapshot = saved.snap; run.sim = saved.sim; run.rec = saved.rec; }
+} });
 // Phase 5: every preset's check (the simulation agrees with the numbers in its About card).
 Object.entries(PRESETS).forEach(([key, P], i) => TESTS.push({ group: i === 0 ? 'Phase 5 presets (each checks its own textbook answer)' : undefined, name: 'Preset: ' + P.name, run() { const { sc, ctx } = presetScene(P); return P.check(sc, ctx); } }));
 function accelOf(sc, o, u, t1, t2) { return accelAlong(sc, sc.objects.indexOf(o), u, t1, t2); }
@@ -3969,7 +4877,7 @@ function systemReadouts(sim) {
   let h = `<div class="roh">System · t = ${sim.t.toFixed(3)} s</div><table class="ro">`;
   h += row('K translational', num(E.K, 'J')) + row('K rotational', num(E.Kr, 'J'));
   h += row(sim.universal ? 'U_g = −Σ G m₁m₂/r' : 'U_g (from y = 0)', num(E.Ug, 'J')) + row('U_s (springs)', num(E.Us, 'J'));
-  h += row('Thermal E_th', `${num(E.Eth, 'J')} <span class="note">friction/impacts ${num(sim.Eloss.contact)}, dampers ${num(sim.Eloss.damper)}, air ${num(sim.Eloss.drag)}, ropes/joints ${num(sim.Eloss.joint)}</span>`);
+  h += row('Thermal E_th', `${num(E.Eth, 'J')} <span class="note">friction/impacts ${num(sim.Eloss.contact)}, dampers ${num(sim.Eloss.damper)}, air ${num(sim.Eloss.drag)}, ropes/joints ${num(sim.Eloss.joint + E.bendLoss)}</span>`);
   h += row('Work in by applied loads', num(E.Win, 'J'));
   h += row('Total K + U + E_th − W_in', `${num(E.total, 'J')} <span class="note">change since t = 0: ${num(dE, 'J')} (${num(100 * dE / scale)}%)</span>`);
   h += row('Momentum p', vecTxt(P.px, P.py, 'kg·m/s'));
@@ -3980,7 +4888,7 @@ function systemReadouts(sim) {
 function refreshReadouts() { const ro = $('ro'); if (ro) ro.innerHTML = readoutHTML(); }
 
 /* ---- Free-body diagram (floating box over the canvas) ---- */
-const KIND_COLOR = { gravity: '#333333', normal: '#1f6fd1', friction: '#e07b00', tension: '#2a9d4b', spring: '#8e44ad', damper: '#8a5a2b', actuator: '#b03060',
+const KIND_COLOR = { bend: '#8e44ad', gravity: '#333333', normal: '#1f6fd1', friction: '#e07b00', tension: '#2a9d4b', spring: '#8e44ad', damper: '#8a5a2b', actuator: '#b03060',
   applied: '#d1495b', moment: '#d1495b', torsion: '#8e44ad', pin: '#666666', weld: '#666666', rod: '#666666', track: '#666666', drag: '#17a2b8' };
 // Number repeated symbols: N, N -> N_1, N_2 (or f_k^{(1)} when the symbol already has a subscript).
 function numberLabels(es) {
@@ -4423,7 +5331,12 @@ function init() {
     e.target.value = '';
   };
   $('bSave').onclick = () => download('scene.json', JSON.stringify(scene, null, 1), 'application/json');
-  $('presetGroup').innerHTML = Object.entries(PRESETS).map(([k, P]) => `<option value="${k}">${esc(P.name)}</option>`).join('');
+  // Presets grouped by topic (anything without a topic goes under "More").
+  const topicOf = (P) => (PRESET_TOPICS.includes(P.topic) ? P.topic : 'More');
+  $('examples').insertAdjacentHTML('beforeend', [...PRESET_TOPICS, 'More'].map((t) => {
+    const opts = Object.entries(PRESETS).filter(([, P]) => topicOf(P) === t).map(([k, P]) => `<option value="${k}">${esc(P.name)}</option>`).join('');
+    return opts ? `<optgroup label="${esc(t)}">${opts}</optgroup>` : '';
+  }).join(''));
   $('examples').onchange = (e) => { const k = e.target.value; if (EX[k]) EX[k](); else if (PRESETS[k]) loadPreset(k); e.target.value = ''; };
   $('bUndo').onclick = undo; $('bRedo').onclick = redo; $('bDel').onclick = deleteSel; $('bFit').onclick = fitView;
   $('bSvg').onclick = () => download('diagram.svg', exportSVGString(), 'image/svg+xml');
